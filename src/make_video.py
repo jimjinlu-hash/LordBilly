@@ -1,15 +1,18 @@
-"""Rendert das Musikvideo "Lord Billy – Oye Como Wau" im Musik-TV-Stil (1080x1920, 30 fps).
+"""Rendert das Musikvideo "Lord Billy – Oye Como Wau" im Stil des 80er/90er-Musikfernsehens.
 
-Aus den drei Fotos entstehen Kamerafahrten mit harten Schnitten im Takt.
-Billys Unterkiefer bewegt sich synchron zu den gesungenen Phonemen, vor dem
-Maul steht ein Mikrofon auf einem Ständer. Dazu Sender-Logo, Credits unten
-links, Bühnenlicht, RGB-Versatz, Stroboskop, Split-Screen im Refrain, große
-Wörter im Takt und Karaoke-Untertitel der gerade gesungenen Zeile.
+Billy ist aus den drei Fotos freigestellt (siehe make_cutouts.py) und steht
+vor grafischen Neon-Hintergründen: Sonnenstrahlen, Memphis-Formen, Bühne
+mit Scheinwerfern, Hypno-Tunnel, Laufschrift und ein Pop-Art-Raster mit
+sechs Billys. Sein Unterkiefer bewegt sich synchron zu den gesungenen
+Phonemen, vor dem Maul steht ein Mikrofon. Dazu Sender-Logo, Credits unten
+links, VHS-Rauschen bei Schnitten, RGB-Versatz, große Wörter im Refrain und
+Karaoke-Untertitel der gerade gesungenen Zeile.
 
 Aufruf:
   python3 src/make_video.py build/song.wav video/LordBilly_OyeComoWau.mp4
   python3 src/make_video.py --preview 13.2,22.0 out_dir     # Einzelbilder
 """
+import json
 import os
 import sys
 import subprocess
@@ -17,7 +20,7 @@ from multiprocessing import Pool
 
 import numpy as np
 import cv2
-from PIL import Image, ImageOps, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 import timeline as TL
 
@@ -25,7 +28,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 W, H = 1080, 1920
 FPS = TL.FPS
 NF = int(round(TL.DURATION * FPS))
-O = np.array([W / 2, H / 2])
 
 FONT_DIR = '/usr/share/fonts/opentype/inter/'
 F_BLACK = FONT_DIR + 'InterDisplay-Black.otf'
@@ -35,57 +37,61 @@ F_SEMI = FONT_DIR + 'InterDisplay-SemiBold.otf'
 F_ITAL = FONT_DIR + 'InterDisplay-SemiBoldItalic.otf'
 F_SYM = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
-GOLD = (255, 200, 61)
-ORANGE = (255, 128, 40)
-PINK = (255, 60, 150)
-CYAN = (40, 220, 255)
+# Neon-Palette
+PINK = (255, 46, 136)
+YELLOW = (255, 214, 0)
+CYAN = (0, 200, 255)
+PURPLE = (120, 60, 255)
+GREEN = (0, 230, 118)
+ORANGE = (255, 120, 0)
+BLACK = (18, 14, 28)
 WHITE = (255, 255, 255)
+GOLD = (255, 200, 61)
 
-# Maul-Geometrie je Foto (Pixel im Originalbild) und Mikrofon-Position
-# (Mitte des Mikrofonkorbs, Radius, Neigung des Griffs in Grad).
-IMAGES = {
-    'A': dict(file='bilder/d31ad93b38b30e8aafbaaa2372b6c3cc.jpeg', prescale=0.75,
-              mouth=dict(x=1470, lip=1345, gap=70, jaw=1700, decay=420, half=330, slope=0.0, amax=115),
+# Maul-Geometrie und Mikrofon je Foto (Pixel im Originalfoto)
+GEOM = {
+    'A': dict(mouth=dict(x=1470, lip=1345, gap=70, jaw=1700, decay=420, half=330, slope=0.0, amax=115),
               mic=dict(x=1745, y=1745, r=150, tilt=30)),
-    'B': dict(file='bilder/ed453128c9dc6df5e54131ae1af421_livephoto.jpeg', prescale=1.0,
-              mouth=dict(x=965, lip=842, gap=42, jaw=975, decay=230, half=180, slope=0.06, amax=58),
+    'B': dict(mouth=dict(x=965, lip=842, gap=42, jaw=975, decay=230, half=180, slope=0.06, amax=58),
               mic=dict(x=1160, y=1035, r=80, tilt=32)),
-    'C': dict(file='bilder/IMG_1332.jpeg', prescale=1.0, sharpen=True,
-              mouth=dict(x=521, lip=627, gap=9, jaw=683, decay=95, half=52, slope=0.0, amax=19),
+    'C': dict(mouth=dict(x=521, lip=627, gap=9, jaw=683, decay=95, half=52, slope=0.0, amax=19),
               mic=dict(x=592, y=716, r=27, tilt=30)),
 }
+# Bildausschnitte: (Quellpunkt x, y, Quellpixel je Ausgabepixel, Ankerpunkt im Bild x, y)
+FRAMES = {
+    ('A', 'full'): (1410, 2040, 2.75, 540, 1010),
+    ('A', 'close'): (1460, 1150, 1.55, 540, 840),
+    ('B', 'full'): (816, 1056, 1.35, 540, 1000),
+    ('B', 'close'): (860, 700, 0.95, 540, 820),
+    ('C', 'full'): (550, 760, 0.45, 540, 1010),
+}
+TILE_FRAMES = {'A': (1460, 1150, 3.0, 270, 330), 'B': (860, 700, 1.85, 270, 320)}
 
-# Einstellungen. Kamera = (Mitte x, Mitte y, Quellpixel je Ausgabepixel, Drehung in Grad)
-# Split-Screen: (Foto, Kamera Anfang, Kamera Ende, Gesichtsmitte y im Foto)
-SPLIT_A = ('A', (1460, 1700, 1.85, 0), (1460, 1700, 1.7, 0), 1230)
-SPLIT_B = ('B', (930, 960, 1.0, 0), (930, 960, 0.92, 0), 720)
-SPLIT_C = ('C', (528, 600, 0.47, 0), (528, 600, 0.44, 0), 600)
+# Einstellungen
 SHOTS = [
-    dict(t0=0.0, t1=4.0, img='C', c0=(540, 545, 0.54, 0), c1=(528, 600, 0.47, 0), flash=False),
-    dict(t0=4.0, t1=6.0, img='B', c0=(960, 1280, 1.30, 0), c1=(940, 1150, 1.12, 0), flash=False),
-    dict(t0=6.0, t1=8.0, img='A', c0=(1500, 2016, 2.0, 0), c1=(1480, 1900, 1.8, 0), flash=True),
-    dict(t0=8.0, t1=12.0, img='B', c0=(930, 960, 1.0, 0), c1=(915, 880, 0.85, 0), flash=True),
-    dict(t0=12.0, t1=16.0, img='A', c0=(1470, 1700, 1.65, 0), c1=(1460, 1450, 1.3, 0), flash=True),
-    dict(t0=16.0, t1=20.0, img='B', c0=(930, 960, 1.0, 0), c1=(950, 860, 0.8, 0), flash=True),
-    dict(t0=20.0, t1=24.0, img='A', c0=(1460, 1500, 1.3, -3), c1=(1460, 1420, 1.1, 2), flash=True),
-    dict(t0=24.0, t1=28.0, img='B', c0=(900, 1000, 1.1, 3), c1=(950, 860, 0.85, -2), flash=True),
-    dict(t0=28.0, t1=30.0, img='A', c0=(1460, 1450, 1.3, 0), c1=(1460, 1430, 1.15, 0), flash=True),
-    dict(t0=30.0, t1=32.0, split=[SPLIT_A, SPLIT_B, SPLIT_C], flash=True),
-    dict(t0=32.0, t1=34.0, img='B', c0=(950, 870, 0.85, 0), c1=(940, 870, 0.75, 0), flash=True),
-    dict(t0=34.0, t1=36.0, img='A', c0=(1460, 1450, 1.2, 0), c1=(1460, 1400, 1.05, -2.0), flash=True),
-    dict(t0=36.0, t1=37.0, img='C', c0=(528, 600, 0.48, 0), c1=(528, 600, 0.44, 0), flash=True, tint=0),
-    dict(t0=37.0, t1=38.0, img='B', c0=(920, 820, 0.95, 0), c1=(920, 820, 0.85, 0), flash=True, tint=1),
-    dict(t0=38.0, t1=39.0, split=[SPLIT_B, SPLIT_C, SPLIT_A], flash=True, tint=2),
-    dict(t0=39.0, t1=40.0, img='A', c0=(1460, 1450, 1.15, 0), c1=(1460, 1420, 1.0, -2.0), flash=True, tint=0),
-    dict(t0=40.0, t1=41.0, img='B', c0=(950, 870, 0.8, 0), c1=(950, 870, 0.7, 0), flash=True, tint=1),
-    dict(t0=41.0, t1=42.0, img='C', c0=(540, 545, 0.54, 0), c1=(530, 560, 0.5, 0), flash=True, tint=2),
-    dict(t0=42.0, t1=45.0, img='A', c0=(1460, 1430, 1.1, -1.5), c1=(1480, 1920, 2.0, 0), flash=True),
+    dict(t0=0.0, t1=4.0, bg='sunburst', pal=(YELLOW, ORANGE), img='C', fr='full', z=(0.85, 1.0), flash=False),
+    dict(t0=4.0, t1=6.0, bg='memphis', pal=(PINK, YELLOW, CYAN), img='B', fr='full', z=(1.0, 1.06)),
+    dict(t0=6.0, t1=8.0, bg='marquee', pal=(CYAN, PINK), img='A', fr='full', z=(1.0, 1.08)),
+    dict(t0=8.0, t1=12.0, bg='stage', img='B', fr='close', z=(0.78, 1.0)),
+    dict(t0=12.0, t1=16.0, bg='memphis', pal=(YELLOW, PINK, CYAN), img='A', fr='close', z=(0.95, 1.05), vhs=True),
+    dict(t0=16.0, t1=20.0, bg='sunburst', pal=(PINK, PURPLE), img='B', fr='close', z=(0.95, 1.04)),
+    dict(t0=20.0, t1=24.0, bg='tunnel', pal=(CYAN, PURPLE, PINK), img='A', fr='close', z=(0.95, 1.05), rot=(-4, 3)),
+    dict(t0=24.0, t1=28.0, bg='stage', img='C', fr='full', z=(1.0, 1.12), vhs=True),
+    dict(t0=28.0, t1=30.0, bg='sunburst', pal=(YELLOW, PINK), img='A', fr='close', z=(1.0, 1.06)),
+    dict(t0=30.0, t1=32.0, bg='grid', imgs='ABBAAB'),
+    dict(t0=32.0, t1=34.0, bg='marquee', pal=(PINK, YELLOW), img='B', fr='close', z=(1.0, 1.06)),
+    dict(t0=34.0, t1=36.0, bg='tunnel', pal=(YELLOW, ORANGE, PINK), img='A', fr='close', z=(1.0, 1.1), rot=(0, -3)),
+    dict(t0=36.0, t1=37.0, bg='stage', img='B', fr='full', z=(1.0, 1.05), vhs=True),
+    dict(t0=37.0, t1=38.0, bg='memphis', pal=(CYAN, YELLOW, PINK), img='C', fr='full', z=(1.0, 1.06)),
+    dict(t0=38.0, t1=39.0, bg='grid', imgs='BAABBA'),
+    dict(t0=39.0, t1=40.0, bg='sunburst', pal=(PINK, YELLOW), img='A', fr='close', z=(1.0, 1.08)),
+    dict(t0=40.0, t1=41.0, bg='tunnel', pal=(GREEN, PURPLE, YELLOW), img='B', fr='close', z=(1.0, 1.06)),
+    dict(t0=41.0, t1=42.0, bg='marquee', pal=(YELLOW, PURPLE), img='C', fr='full', z=(1.0, 1.06)),
+    dict(t0=42.0, t1=45.0, bg='stage', img='A', fr='full', z=(1.2, 0.95), vhs=True),
 ]
-CROSSFADES = {4.0: 0.4}
-TINTS = [((1.0, 0.35, 0.75), (0.15, 0.0, 0.35)),     # pink
-         ((0.35, 0.9, 1.0), (0.0, 0.1, 0.35)),       # cyan
-         ((1.0, 0.8, 0.25), (0.3, 0.05, 0.0))]       # gold
-CHORUS_TONE = ((1.0, 0.62, 0.82), (0.05, 0.12, 0.42))
+for _s in SHOTS:
+    _s.setdefault('flash', True)
+GRID_COLORS = [(PINK, YELLOW), (CYAN, PINK), (YELLOW, PURPLE), (GREEN, PINK), (PURPLE, YELLOW), (ORANGE, CYAN)]
 
 
 # ----------------------------------------------------------------- Hilfen
@@ -97,6 +103,10 @@ def smooth(x):
 def ease(x):
     x = np.clip(x, 0, 1)
     return 0.5 - 0.5 * np.cos(np.pi * x)
+
+
+def col(c):
+    return np.array(c, np.float32) / 255
 
 
 KICKS = TL.kick_times()
@@ -112,6 +122,10 @@ def env_after(times, t, tau):
 
 def kick_env(t):
     return env_after(KICKS, t, 0.13)
+
+
+def beat_index(t):
+    return int(np.sum(BEATS <= t))
 
 
 def font(path, size):
@@ -164,80 +178,62 @@ def xform(spr, scale=1.0, angle=0.0):
     return cv2.warpAffine(spr, m, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0, 0))
 
 
-# ----------------------------------------------------------------- Bilder
-_IMG = {}
+# ----------------------------------------------------------------- Billy (freigestellt)
+_CUT = {}
 
 
-def load_images():
-    for k, spec in IMAGES.items():
-        im = ImageOps.exif_transpose(Image.open(os.path.join(ROOT, spec['file']))).convert('RGB')
-        if spec.get('sharpen'):
-            im = im.filter(ImageFilter.UnsharpMask(radius=2, percent=60, threshold=2))
-        a = np.asarray(im).astype(np.float32)
-        # knackiger Musikvideo-Look: mehr Kontrast, warme Lichter
-        a[..., 0] *= 1.05
-        a[..., 2] *= 0.94
-        a = 255 * (0.5 + 1.14 * (a / 255 - 0.5))
-        a = np.clip(a, 0, 255).astype(np.uint8)
-        f = spec['prescale']
-        if f != 1.0:
-            a = cv2.resize(a, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
-        _IMG[k] = dict(img=a, f=f, size=(im.size[0], im.size[1]))
+def load_cutouts():
+    meta = json.load(open(os.path.join(ROOT, 'bilder', 'freigestellt', 'cutouts.json')))
+    for k, m in meta.items():
+        a = np.asarray(Image.open(os.path.join(ROOT, m['file']))).astype(np.float32)
+        rgb, al = a[..., :3], a[..., 3:4] / 255
+        # knackiger Musikvideo-Look
+        rgb = 255 * (0.5 + 1.1 * (rgb / 255 - 0.5))
+        rgb[..., 0] *= 1.03
+        rgb = np.clip(rgb, 0, 255)
+        pre = np.dstack([rgb * al, al[..., 0] * 255]).astype(np.uint8)   # vormultipliziert
+        _CUT[k] = dict(img=pre, f=m['scale'])
 
 
-def clamp_cam(k, cx, cy, s, rot):
-    iw, ih = _IMG[k]['size']
-    th = np.radians(rot)
-    hw = (W / 2 * abs(np.cos(th)) + H / 2 * abs(np.sin(th))) * s
-    hh = (W / 2 * abs(np.sin(th)) + H / 2 * abs(np.cos(th))) * s
-    cx = iw / 2 if 2 * hw >= iw else np.clip(cx, hw, iw - hw)
-    cy = ih / 2 if 2 * hh >= ih else np.clip(cy, hh, ih - hh)
-    return cx, cy, s, rot
-
-
-def camera_for(k, c0, c1, t0, t1, t):
+def make_cam(k, fr, t0, t1, t, z=(1.0, 1.0), rot=(0.0, 0.0), scale=1.0, anchor=None):
+    """Kamera = (Quell-x, Quell-y, Quellpixel je Ausgabepixel, Drehung, Anker-x, Anker-y)."""
+    cx, cy, s, ax, ay = TILE_FRAMES[k] if fr == 'tile' else FRAMES[(k, fr)]
+    if anchor is not None:
+        ax, ay = anchor
     u = ease((t - t0) / (t1 - t0))
-    cx, cy, s, rot = [a + (b - a) * u for a, b in zip(c0, c1)]
+    zz = z[0] + (z[1] - z[0]) * u
+    r = rot[0] + (rot[1] - rot[0]) * u
     sec = TL.section_at(t)
     hot = sec in ('chorus', 'solo')
     ke = kick_env(t)
-    s *= 1 - (0.035 if hot else 0.018) * ke
-    rot += (1.4 if sec == 'solo' else 0.8) * np.sin(2 * np.pi * t / (2 * TL.BAR))
-    if hot:   # Kamerawackler auf dem Kick
-        rng = np.random.default_rng(int(t * 1000))
-        cx += s * 9 * ke * rng.uniform(-1, 1)
-        cy += s * 9 * ke * rng.uniform(-1, 1)
-    return clamp_cam(k, cx, cy, s, rot)
-
-
-def camera(sh, t):
-    return camera_for(sh['img'], sh['c0'], sh['c1'], sh['t0'], sh['t1'], t)
-
-
-def render_photo(k, cam):
-    cx, cy, s, rot = cam
-    d = _IMG[k]
-    f = d['f']
-    th = np.radians(rot)
-    c, sn = np.cos(th), np.sin(th)
-    # Ausgabe p -> Quelle q = C + s R (p - O), danach Vorskalierung f
-    m = np.array([[s * c, -s * sn, 0], [s * sn, s * c, 0]], dtype=np.float64)
-    m[:, 2] = np.array([cx, cy]) - m[:, :2] @ O
-    m *= f
-    return cv2.warpAffine(d['img'], m, (W, H), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-                          borderMode=cv2.BORDER_REFLECT101)
+    zz *= 1 + (0.045 if hot else 0.02) * ke
+    r += (3.0 if hot else 1.6) * np.sin(2 * np.pi * t / (2 * TL.BEAT * 2))   # Wippen im Takt
+    ay -= (22 if hot else 10) * ke * (1 if fr != 'tile' else 0.4)              # kleiner Hüpfer auf dem Kick
+    return (cx, cy, s / zz * scale, r, ax, ay)
 
 
 def to_out(cam, q):
-    cx, cy, s, rot = cam
+    cx, cy, s, rot, ax, ay = cam
     th = np.radians(rot)
     c, sn = np.cos(th), np.sin(th)
     v = (np.asarray(q, dtype=float) - np.array([cx, cy])) / s
-    return O + np.array([c * v[0] + sn * v[1], -sn * v[0] + c * v[1]])
+    return np.array([ax, ay]) + np.array([c * v[0] + sn * v[1], -sn * v[0] + c * v[1]])
+
+
+def render_cutout(k, cam, size=(W, H)):
+    cx, cy, s, rot, ax, ay = cam
+    d = _CUT[k]
+    th = np.radians(rot)
+    c, sn = np.cos(th), np.sin(th)
+    m = np.array([[s * c, -s * sn, 0], [s * sn, s * c, 0]], dtype=np.float64)
+    m[:, 2] = np.array([cx, cy]) - m[:, :2] @ np.array([ax, ay])
+    m *= d['f']
+    return cv2.warpAffine(d['img'], m, size, flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
 
 
 def mouth_geom(k, cam):
-    m = IMAGES[k]['mouth']
+    m = GEOM[k]['mouth']
     s = cam[2]
     xc, lip = to_out(cam, (m['x'], m['lip']))
     slope = np.tan(np.arctan(m['slope']) - np.radians(cam[3]))
@@ -250,13 +246,16 @@ def open_mouth(frame, g, amount):
     A = amount * g['amax']
     if A < 0.4:
         return frame
+    fh, fw = frame.shape[:2]
     hw = 1.3 * g['half']
-    x0, x1 = int(max(g['xc'] - hw, 0)), int(min(g['xc'] + hw, W - 1))
+    x0, x1 = int(max(g['xc'] - hw, 0)), int(min(g['xc'] + hw, fw - 1))
     span = g['J'] + g['D'] + 4
+    if x1 <= x0:
+        return frame
     offs = g['slope'] * (np.arange(x0, x1 + 1) - g['xc'])
     y0 = int(max(g['lip'] + offs.min() - 6, 0))
-    y1 = int(min(g['lip'] + offs.max() + span + 6, H - 1))
-    if x1 <= x0 or y1 <= y0:
+    y1 = int(min(g['lip'] + offs.max() + span + 6, fh - 1))
+    if y1 <= y0:
         return frame
     ys = np.arange(y0, y1 + 1, dtype=np.float32)
     spread = offs.max() - offs.min()
@@ -281,8 +280,33 @@ def open_mouth(frame, g, amount):
     return frame
 
 
+def composite_billy(F, layer, outline=10, shadow=(18, 22), shadow_col=BLACK, posterize=None):
+    """Billy-Ebene (vormultipliziert, RGBA uint8) mit Sticker-Kontur und Pop-Schatten auf F legen."""
+    a = layer[..., 3].astype(np.float32) / 255
+    rgb = layer[..., :3].astype(np.float32) / 255
+    if posterize is not None:   # Pop-Art: Helligkeit -> drei Farbstufen
+        dark, mid, light = posterize
+        l = np.where(a > 0.01, rgb.mean(axis=2) / np.maximum(a, 0.01), 0)
+        q = np.where(l[..., None] < 0.42, col(dark), np.where(l[..., None] < 0.72, col(mid), col(light)))
+        rgb = (0.72 * q + 0.28 * rgb / np.maximum(a, 0.01)[..., None]) * a[..., None]
+    if shadow:
+        dx, dy = shadow
+        sh = np.zeros_like(a)
+        sh[dy:, dx:] = a[:-dy, :-dx]
+        F *= (1 - 0.9 * sh[..., None])
+        F += col(shadow_col) * 0.9 * sh[..., None]
+    if outline:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * outline + 1, 2 * outline + 1))
+        o = cv2.dilate((a > 0.35).astype(np.uint8) * 255, k)
+        o = cv2.GaussianBlur(o, (0, 0), 1.2).astype(np.float32) / 255
+        F *= (1 - o[..., None])
+        F += o[..., None]
+    F *= (1 - a[..., None])
+    F += rgb
+
+
 # ----------------------------------------------------------------- Mikrofon
-MIC_R = 170   # Korbradius im Sprite
+MIC_R = 170
 
 
 def build_mic():
@@ -295,7 +319,6 @@ def build_mic():
     alpha = np.zeros((Hd, Wd), np.float32)
     L = np.array([-0.45, -0.55, 0.7])
     L /= np.linalg.norm(L)
-    # Griff: konisch, schwarz, mit Glanzstreifen und Chromringen
     y0, y1 = cy + 0.45 * R, cy + 4.3 * R
     u = (yy - y0) / (y1 - y0)
     hw = 0.46 * R * (1 - u) + 0.27 * R * u
@@ -307,11 +330,10 @@ def build_mic():
     chrome = np.array([0.55, 0.56, 0.6]) * (0.45 + 0.6 * dif[..., None]) + spec[..., None] * 0.9 \
         + 0.12 * np.sin(nx * 9)[..., None]
     is_ring = ((u >= 0) & (u < 0.1)) | ((u > 0.9) & (u <= 1))
-    col = np.where(is_ring[..., None], chrome, body)
+    c = np.where(is_ring[..., None], chrome, body)
     a_h = np.clip(hw - np.abs(xx - cx) + 0.5, 0, 1) * ((u >= 0) & (u <= 1))
-    rgb = rgb * (1 - a_h[..., None]) + col * a_h[..., None]
+    rgb = rgb * (1 - a_h[..., None]) + c * a_h[..., None]
     alpha = np.maximum(alpha, a_h)
-    # Halteklammer am Ende
     kx, ky, kr = cx, y1 + 0.18 * R, 0.24 * R
     d = np.sqrt((xx - kx) ** 2 + (yy - ky) ** 2)
     a_k = np.clip(kr - d + 0.5, 0, 1)
@@ -320,26 +342,21 @@ def build_mic():
     ck = np.array([0.1, 0.1, 0.11]) + dk[..., None] * 0.35
     rgb = rgb * (1 - a_k[..., None]) + ck * a_k[..., None]
     alpha = np.maximum(alpha, a_k)
-    # Korb: Kugel mit Drahtgitter
     dx, dy = (xx - cx) / R, (yy - cy) / R
     r2 = dx ** 2 + dy ** 2
     inside = r2 <= 1.0
     nzs = np.sqrt(np.clip(1 - r2, 0, 1))
     dif = np.clip(dx * L[0] + dy * L[1] + nzs * L[2], 0, 1)
-    refl = 2 * dif * nzs - L[2]
-    spec = np.clip(refl, 0, 1) ** 25
+    spec = np.clip(2 * dif * nzs - L[2], 0, 1) ** 25
     lat = np.arcsin(np.clip(dy, -1, 1))
     lon = np.arctan2(dx, np.maximum(nzs, 1e-3))
-    k = 15
-    g1 = np.abs(np.sin(k * (lat + lon)))
-    g2 = np.abs(np.sin(k * (lat - lon)))
+    g1 = np.abs(np.sin(15 * (lat + lon)))
+    g2 = np.abs(np.sin(15 * (lat - lon)))
     wire = smooth((0.35 - np.minimum(g1, g2)) / 0.2)
     hole = np.array([0.1, 0.1, 0.11]) + 0.12 * dif[..., None]
     metal = np.array([0.62, 0.63, 0.66]) * (0.35 + 0.75 * dif[..., None]) + spec[..., None]
-    gcol = hole * (1 - wire[..., None]) + metal * wire[..., None]
-    gcol += spec[..., None] * 0.35
+    gcol = hole * (1 - wire[..., None]) + metal * wire[..., None] + spec[..., None] * 0.35
     gcol *= (0.55 + 0.45 * nzs[..., None] ** 0.5)
-    # Ring zwischen Korb und Griff
     band = (dy > 0.55) & (dy < 0.75)
     gcol = np.where(band[..., None], np.array([0.7, 0.71, 0.74]) * (0.4 + 0.7 * dif[..., None]) + spec[..., None], gcol)
     a_s = np.clip((1 - np.sqrt(r2)) * R + 0.5, 0, 1) * inside
@@ -349,10 +366,11 @@ def build_mic():
     return spr, (cx, cy), (kx, ky)
 
 
-def draw_mic(frame, k, cam, t):
-    """Mikrofon samt Ständer passend zur Kamera vor das Maul setzen (uint8-Bild)."""
-    spec = IMAGES[k]['mic']
+def draw_mic(F, k, cam, t):
+    """Mikrofon samt Ständer passend zur Kamera vor das Maul setzen (F: float32)."""
+    spec = GEOM[k]['mic']
     spr, (cx, cy), (kx, ky) = SPR['mic']
+    fh, fw = F.shape[:2]
     gx, gy = to_out(cam, (spec['x'], spec['y']))
     r_out = spec['r'] / cam[2]
     sc = r_out / MIC_R
@@ -361,41 +379,202 @@ def draw_mic(frame, k, cam, t):
     m[0, 2] += gx - cx
     m[1, 2] += gy - cy
     jx, jy = m @ np.array([kx, ky, 1.0])
-    # Bounding-Box
     h, w = spr.shape[:2]
     pts = m @ np.array([[0, 0, 1], [w, 0, 1], [0, h, 1], [w, h, 1]], float).T
-    x0, x1 = int(max(pts[0].min() - 4, 0)), int(min(pts[0].max() + 4, W))
-    y0, y1 = int(max(min(pts[1].min(), jy) - 4, 0)), H
+    x0, x1 = int(max(pts[0].min() - 4, 0)), int(min(pts[0].max() + 4, fw))
+    y0, y1 = int(max(min(pts[1].min(), jy) - 4, 0)), fh
     if x1 <= x0 or y1 <= y0:
-        return frame
+        return
     m2 = m.copy()
     m2[0, 2] -= x0
     m2[1, 2] -= y0
-    layer = cv2.warpAffine(spr, m2, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0, 0))
-    # Ständer: senkrechte Chromstange von der Klammer bis zum Bildrand
+    layer = cv2.warpAffine(spr, m2, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR,
+                           borderValue=(0, 0, 0, 0)).astype(np.float32) / 255
     pw = max(3, int(0.17 * r_out))
     px0 = int(jx - pw / 2) - x0
-    if 0 <= px0 and px0 + pw <= layer.shape[1] and jy < H:
+    if 0 <= px0 and px0 + pw <= layer.shape[1] and jy < fh:
         prof = np.linspace(-1, 1, pw)
-        shade = (0.35 + 0.55 * np.clip(1 - (prof + 0.35) ** 2, 0, 1) + 0.4 * np.exp(-((prof + 0.3) / 0.15) ** 2))
-        col = np.clip(np.outer(shade, [0.75, 0.76, 0.8]) * 255, 0, 255)
+        shade = 0.35 + 0.55 * np.clip(1 - (prof + 0.35) ** 2, 0, 1) + 0.4 * np.exp(-((prof + 0.3) / 0.15) ** 2)
+        c = np.clip(np.outer(shade, [0.75, 0.76, 0.8]), 0, 1)
         ys = int(max(jy - y0, 0))
         pole = layer[ys:, px0:px0 + pw]
-        under = pole[..., 3:4].astype(np.float32) / 255
-        pole[..., :3] = (pole[..., :3] * under + col[None] * (1 - under)).astype(np.uint8)
-        pole[..., 3] = 255
-    a = layer[..., 3:4].astype(np.float32) / 255
-    out = frame.copy()
-    reg = out[y0:y1, x0:x1].astype(np.float32)
-    # weicher Schlagschatten auf Billy
+        under = pole[..., 3:4]
+        pole[..., :3] = pole[..., :3] * under + c[None] * (1 - under)
+        pole[..., 3] = 1
+    a = layer[..., 3:4]
+    reg = F[y0:y1, x0:x1]
     sh = cv2.GaussianBlur(a[..., 0], (0, 0), max(2, r_out * 0.15))
-    off = int(r_out * 0.25)
+    off = max(1, int(r_out * 0.25))
     shm = np.zeros_like(sh)
-    shm[off:, off:] = sh[:-off or None, :-off or None] if off > 0 else sh
-    reg *= (1 - 0.38 * shm[..., None])
-    reg = reg * (1 - a) + layer[..., :3].astype(np.float32) * a
-    out[y0:y1, x0:x1] = np.clip(reg, 0, 255).astype(np.uint8)
-    return out
+    shm[off:, off:] = sh[:-off, :-off]
+    reg *= (1 - 0.4 * shm[..., None])
+    reg *= (1 - a)
+    reg += layer[..., :3] * a
+
+
+# ----------------------------------------------------------------- Hintergründe
+_hy, _hx = np.mgrid[0:H // 2, 0:W // 2].astype(np.float32) * 2
+
+
+def up(img):
+    return cv2.resize(img, (W, H), interpolation=cv2.INTER_LINEAR)
+
+
+def bg_sunburst(sh, t):
+    c1, c2 = col(sh['pal'][0]), col(sh['pal'][1])
+    ang = np.arctan2(_hy - 820, _hx - 540)
+    r = np.sqrt((_hx - 540) ** 2 + (_hy - 820) ** 2)
+    v = np.sin(16 * (ang + 0.9 * t))
+    m = smooth((v + 0.08) / 0.16)[..., None]
+    img = c1 * (1 - m) + c2 * m
+    img *= (1.05 - 0.35 * smooth(r / 1300))[..., None]
+    glow = np.exp(-(r / 380) ** 2)[..., None] * (0.35 + 0.25 * kick_env(t))
+    img = img + (1 - img) * glow
+    return up(img)
+
+
+def bg_tunnel(sh, t):
+    cs = [col(c) for c in sh['pal']]
+    dx, dy = _hx - 540, _hy - 820
+    r = np.maximum(np.abs(dx), np.abs(dy) * 0.8) + 1
+    band = 5.0 * np.log(r) - 2.2 * t * (1 + 0.6 * kick_env(t))
+    idx = np.floor(band).astype(int) % len(cs)
+    frac = band - np.floor(band)
+    edge = smooth(frac / 0.06)[..., None]   # Kantenglättung
+    cur = np.stack(cs)[idx]
+    prev = np.stack(cs)[(idx - 1) % len(cs)]
+    img = prev * (1 - edge) + cur * edge
+    img *= (0.7 + 0.3 * smooth(r / 900))[..., None]
+    return up(img)
+
+
+MEMPHIS = {}
+
+
+def memphis_shapes(seed, pal):
+    rng = np.random.default_rng(seed)
+    kinds = ['circle', 'ring', 'triangle', 'zigzag', 'squiggle', 'dots', 'cross', 'ring', 'triangle', 'zigzag',
+             'circle', 'squiggle', 'dots', 'cross']
+    shapes = []
+    for i, kd in enumerate(kinds):
+        shapes.append(dict(kind=kd, x=rng.uniform(-50, W + 50), y=rng.uniform(-50, H + 50),
+                           size=rng.uniform(70, 170), rot=rng.uniform(0, 360), vr=rng.uniform(-40, 40),
+                           vx=rng.uniform(-30, 30), vy=rng.uniform(-40, 40),
+                           col=pal[1 + i % (len(pal) - 1)] if i % 4 else (WHITE if i % 8 else BLACK)))
+    return shapes
+
+
+def bg_memphis(sh, t):
+    key = id(sh)
+    if key not in MEMPHIS:
+        MEMPHIS[key] = memphis_shapes(int(sh['t0'] * 10), sh['pal'])
+    # Grundfarbe wechselt auf jedem Takt zwischen den ersten beiden Palettenfarben
+    base = sh['pal'][0] if int(t / TL.BAR) % 2 == 0 else sh['pal'][-1]
+    img = np.empty((H, W, 3), np.uint8)
+    img[:] = base
+    kp = 1 + 0.12 * kick_env(t)
+    dt = t - sh['t0']
+    for s in MEMPHIS[key]:
+        x, y = s['x'] + s['vx'] * dt, s['y'] + s['vy'] * dt
+        sz, ang = s['size'] * kp, np.radians(s['rot'] + s['vr'] * dt)
+        c = s['col'] if s['col'] != base else WHITE
+        p = (int(x), int(y))
+        if s['kind'] == 'circle':
+            cv2.circle(img, p, int(sz * 0.6), c, -1, cv2.LINE_AA)
+            cv2.circle(img, p, int(sz * 0.6), BLACK, 7, cv2.LINE_AA)
+        elif s['kind'] == 'ring':
+            cv2.circle(img, p, int(sz * 0.7), c, 24, cv2.LINE_AA)
+        elif s['kind'] == 'triangle':
+            pts = np.array([[x + sz * np.cos(ang + k * 2.094), y + sz * np.sin(ang + k * 2.094)] for k in range(3)], np.int32)
+            cv2.fillPoly(img, [pts], c, cv2.LINE_AA)
+            cv2.polylines(img, [pts], True, BLACK, 7, cv2.LINE_AA)
+        elif s['kind'] == 'zigzag':
+            u = np.linspace(-1.2, 1.2, 7) * sz
+            v = np.array([(-1) ** k for k in range(7)]) * sz * 0.25
+            pts = np.stack([x + u * np.cos(ang) - v * np.sin(ang), y + u * np.sin(ang) + v * np.cos(ang)], 1)
+            cv2.polylines(img, [pts.astype(np.int32)], False, c, 18, cv2.LINE_AA)
+        elif s['kind'] == 'squiggle':
+            u = np.linspace(-1.4, 1.4, 40) * sz
+            v = np.sin(u / sz * 6 + dt * 4) * sz * 0.18
+            pts = np.stack([x + u * np.cos(ang) - v * np.sin(ang), y + u * np.sin(ang) + v * np.cos(ang)], 1)
+            cv2.polylines(img, [pts.astype(np.int32)], False, c, 14, cv2.LINE_AA)
+        elif s['kind'] == 'dots':
+            for i in range(4):
+                for j in range(4):
+                    cv2.circle(img, (int(x + (i - 1.5) * sz * 0.4), int(y + (j - 1.5) * sz * 0.4)),
+                               int(sz * 0.08), c, -1, cv2.LINE_AA)
+        elif s['kind'] == 'cross':
+            for a2 in (ang, ang + np.pi / 2):
+                d = np.array([np.cos(a2), np.sin(a2)]) * sz * 0.6
+                cv2.line(img, (int(x - d[0]), int(y - d[1])), (int(x + d[0]), int(y + d[1])), c, 22, cv2.LINE_AA)
+    return img.astype(np.float32) / 255
+
+
+def bg_marquee(sh, t):
+    base, ink = sh['pal']
+    img = np.empty((H, W, 3), np.float32)
+    img[:] = col(base)
+    strip = SPR['marquee'][ink]
+    sw = strip.shape[1]
+    for i in range(7):
+        y = 140 + i * 290
+        speed = 260 if i % 2 == 0 else -260
+        off = int((speed * t + i * 333) % sw)
+        for x in (-off, -off + sw):
+            blend(img, strip, x + sw / 2, y, 0.9)
+    return img
+
+
+STAGE = {}
+
+
+def bg_stage(sh, t):
+    if 'base' not in STAGE:
+        yy = np.linspace(0, 1, H, dtype=np.float32)[:, None, None]
+        top, bot = col((38, 12, 62)), col((6, 4, 16))
+        base = top * (1 - yy) + bot * yy
+        base = np.repeat(base, W, axis=1)
+        floor = (np.arange(H) > 1480)[:, None, None]
+        base = np.where(floor, col((14, 8, 26)) + 0.08 * (np.linspace(0, 1, H)[:, None, None] - 0.77), base)
+        STAGE['base'] = base.astype(np.float32)
+    img = STAGE['base'].copy()
+    # Lichterwand: Glühbirnen im Takt
+    small = np.zeros((H // 4, W // 4, 3), np.float32)
+    bi = beat_index(t)
+    cols = [PINK, CYAN, YELLOW, PURPLE]
+    for r in range(5):
+        for c in range(7):
+            on = (r + c + bi) % 3 != 0
+            cc = col(cols[(r + c) % 4]) * (1.0 if on else 0.15)
+            cv2.circle(small, (int((80 + c * 153) / 4), int((150 + r * 150) / 4)), 9, cc.tolist(), -1, cv2.LINE_AA)
+    glow = cv2.GaussianBlur(small, (0, 0), 6) * 2.2 + small
+    img += up(glow) * 0.8
+    # Spot auf dem Boden
+    yy, xx = np.ogrid[0:H, 0:W]
+    spot = np.exp(-(((xx - 540) / 420.0) ** 2 + ((yy - 1600) / 110.0) ** 2))
+    img += spot[..., None] * col((255, 230, 190)) * 0.5
+    return img
+
+
+def stage_beams(t):
+    """Scheinwerferkegel (additiv, für die Bühne)."""
+    LW, LH = 135, 240
+    yy, xx = np.mgrid[0:LH, 0:LW].astype(np.float32)
+    xx, yy = (xx + 0.5) / LW, (yy + 0.5) / LH
+    add = np.zeros((LH, LW, 3), np.float32)
+    k = kick_env(t)
+    for i, (bx, c) in enumerate(zip((0.05, 0.3, 0.7, 0.95), (PINK, WHITE, WHITE, CYAN))):
+        ang = np.radians(16 * np.sin(2 * np.pi * t / (2 * TL.BAR) + i * 1.7) + (15 if bx < 0.5 else -15))
+        dx, dy = xx - bx, (yy + 0.03) * H / W
+        a = np.arctan2(dx, dy) - ang
+        cone = np.exp(-(a / 0.1) ** 2) * np.exp(-dy / 2.5)
+        add += cone[..., None] * col(c) * (0.22 + 0.12 * k)
+    return up(add)
+
+
+def background(sh, t):
+    return {'sunburst': bg_sunburst, 'tunnel': bg_tunnel, 'memphis': bg_memphis,
+            'marquee': bg_marquee, 'stage': bg_stage}[sh['bg']](sh, t)
 
 
 # ----------------------------------------------------------------- Einstellungen rendern
@@ -406,105 +585,51 @@ def shot_at(t):
     return SHOTS[-1]
 
 
-def render_single(k, cam, t, mouth):
-    fr = render_photo(k, cam)
-    fr = open_mouth(fr, mouth_geom(k, cam), mouth)
-    return draw_mic(fr, k, cam, t)
+def shot_cam(sh, t):
+    return make_cam(sh['img'], sh['fr'], sh['t0'], sh['t1'], t, sh.get('z', (1, 1)), sh.get('rot', (0, 0)))
+
+
+def render_grid(sh, t, mouth):
+    tw, th = W // 2, H // 3
+    layers = {}
+    for k in set(sh['imgs']):
+        cam = make_cam(k, 'tile', sh['t0'], sh['t1'], t, (1.0, 1.06))
+        lay = render_cutout(k, cam, (tw, th))
+        lay = open_mouth(lay, mouth_geom(k, cam), mouth)
+        layers[k] = (lay, cam)
+    F = np.zeros((H, W, 3), np.float32)
+    for i, k in enumerate(sh['imgs']):
+        r, c = divmod(i, 2)
+        bgc, ink = GRID_COLORS[(i + beat_index(t)) % len(GRID_COLORS)]
+        tile = np.empty((th, tw, 3), np.float32)
+        tile[:] = col(bgc)
+        lay, cam = layers[k]
+        composite_billy(tile, lay, outline=6, shadow=(10, 12), posterize=(BLACK, ink, (255, 245, 225)))
+        draw_mic(tile, k, cam, t)
+        F[r * th:(r + 1) * th, c * tw:(c + 1) * tw] = tile
+    F[:, tw - 4:tw + 4] = 0.05
+    for r in (1, 2):
+        F[r * th - 4:r * th + 4] = 0.05
+    return F
 
 
 def render_shot(sh, t, mouth):
-    if 'split' not in sh:
-        return render_single(sh['img'], camera(sh, t), t, mouth)
-    out = np.zeros((H, W, 3), np.uint8)
-    bh = H // 3
-    for i, (k, c0, c1, fy) in enumerate(sh['split']):
-        cam = camera_for(k, c0, c1, sh['t0'], sh['t1'], t)
-        fr = render_single(k, cam, t, mouth)
-        fx = IMAGES[k]['mouth']['x']
-        cy = int(np.clip(to_out(cam, (fx, fy))[1], bh / 2, H - bh / 2))
-        out[i * bh:(i + 1) * bh] = fr[cy - bh // 2:cy - bh // 2 + bh]
-    for i in (1, 2):   # Trennlinien
-        out[i * bh - 4:i * bh + 4] = (255, 60, 150) if i == 1 else (40, 220, 255)
-    return out
-
-
-def photo_frame(t, mouth):
-    for cut, dur in CROSSFADES.items():
-        if cut - dur / 2 <= t < cut + dur / 2:
-            prev, nxt = shot_at(cut - 1e-3), shot_at(cut)
-            w = smooth((t - (cut - dur / 2)) / dur)
-            fa = render_shot(prev, min(t, prev['t1'] - 1e-3), mouth)
-            fb = render_shot(nxt, max(t, nxt['t0']), mouth)
-            return (fa.astype(np.float32) * (1 - w) + fb.astype(np.float32) * w).astype(np.uint8)
-    return render_shot(shot_at(t), t, mouth)
-
-
-# ----------------------------------------------------------------- Licht & Look
-LW, LH = 135, 240
-_yy, _xx = np.mgrid[0:LH, 0:LW].astype(np.float32)
-_xx = (_xx + 0.5) / LW
-_yy = (_yy + 0.5) / LH
-
-
-def beam_colors(t):
-    sec = TL.section_at(t)
-    if sec == 'chorus':
-        return [PINK, CYAN, PINK, CYAN], 0.22
-    if sec == 'solo':
-        i = int(t) % 3
-        cols = [PINK, CYAN, GOLD]
-        return [cols[i], cols[(i + 1) % 3], cols[i], cols[(i + 2) % 3]], 0.28
-    if sec in ('verse', 'riff'):
-        return [GOLD, ORANGE, GOLD, ORANGE], 0.12
-    return [GOLD, ORANGE, GOLD, ORANGE], 0.08
-
-
-def light_maps(t):
-    k = kick_env(t)
-    r = np.sqrt(((_xx - 0.5) * 1.1) ** 2 + ((_yy - 0.47) * 0.75) ** 2)
-    vig = 1 - (0.6 + 0.12 * k) * smooth((r - 0.2) / 0.42)
-    bottom = 1 - 0.5 * smooth((_yy - 0.7) / 0.28)       # Lesbarkeit der Untertitel
-    mult = vig * bottom
-    add = np.zeros((LH, LW, 3), np.float32)
-    # Bühnen-Lichtkegel von oben
-    cols, inten = beam_colors(t)
-    aspect = H / W
-    for i, (bx, col) in enumerate(zip((0.08, 0.36, 0.64, 0.92), cols)):
-        ang = np.radians(18 * np.sin(2 * np.pi * t / (2 * TL.BAR) + i * 1.7) + (12 if bx < 0.5 else -12))
-        dx = _xx - bx
-        dy = (_yy + 0.05) * aspect
-        a = np.arctan2(dx, dy) - ang
-        cone = np.exp(-(a / 0.09) ** 2) * np.exp(-dy / 2.2) * (dy > 0)
-        add += cone[..., None] * (np.array(col, np.float32) / 255) * inten * (0.8 + 0.4 * k)
-    # weiche Farbflecken (Lens-Flare-Gefühl)
-    for col, bx, by, sp, ph in (((1.0, 0.55, 0.15), 0.25, 0.10, 0.11, 0.0),
-                                ((1.0, 0.25, 0.5), 0.8, 0.18, 0.07, 2.0)):
-        x = bx + 0.25 * np.sin(sp * 2 * np.pi * t + ph)
-        y = by + 0.08 * np.cos(sp * 1.7 * np.pi * t + ph)
-        d2 = (_xx - x) ** 2 + ((_yy - y) * 0.56) ** 2
-        add += np.exp(-d2 / 0.03)[..., None] * np.array(col, np.float32) * 0.12
-    mult = cv2.resize(mult, (W, H), interpolation=cv2.INTER_LINEAR)[..., None]
-    add = cv2.resize(add, (W, H), interpolation=cv2.INTER_LINEAR)
-    return mult, add
-
-
-def tone(F, hi, lo, amt):
-    """Split-Toning: Lichter Richtung `hi`, Schatten Richtung `lo`."""
-    if amt <= 0:
-        return F
-    l = F.mean(axis=2, keepdims=True)
-    toned = l * np.array(hi, np.float32) * 1.15 + (1 - l) * np.array(lo, np.float32) * 0.5
-    toned = np.clip(toned * (0.6 + 0.6 * l), 0, 1)
-    return F * (1 - amt) + toned * amt
-
-
-GRAIN = []
-
-
-def build_grain():
-    rng = np.random.default_rng(3)
-    for _ in range(6):
-        GRAIN.append(cv2.GaussianBlur((rng.standard_normal((H // 2, W // 2)) * 0.022).astype(np.float32), (0, 0), 0.8))
+    if sh['bg'] == 'grid':
+        return render_grid(sh, t, mouth)
+    F = background(sh, t)
+    k = sh['img']
+    cam = shot_cam(sh, t)
+    lay = render_cutout(k, cam)
+    lay = open_mouth(lay, mouth_geom(k, cam), mouth)
+    if sh['bg'] == 'stage':
+        composite_billy(F, lay, outline=0, shadow=None)
+    else:
+        composite_billy(F, lay)
+    draw_mic(F, k, cam, t)
+    if sh['bg'] == 'stage':
+        b = stage_beams(t)
+        F += b * (1 - F)
+    return F
 
 
 # ----------------------------------------------------------------- Texte
@@ -538,7 +663,7 @@ def build_lyrics():
         maxw = max(sum(widths[i] for i in r) for r in rows)
         bw, bh = int(maxw + 2 * padx + 40), int(len(rows) * lh + 2 * pady + 40)
         base = Image.new('RGBA', (bw, bh), (0, 0, 0, 0))
-        ImageDraw.Draw(base).rounded_rectangle((20, 20, bw - 20, bh - 20), radius=38, fill=(20, 8, 4, 130))
+        ImageDraw.Draw(base).rounded_rectangle((20, 20, bw - 20, bh - 20), radius=38, fill=(14, 6, 24, 175))
         hi = base.copy()
         boxes = {}
         for ri, r in enumerate(rows):
@@ -546,12 +671,12 @@ def build_lyrics():
             x = (bw - rw) / 2
             y = 20 + pady + ri * lh
             for i in r:
-                for img, col in ((base, WHITE), (hi, GOLD)):
-                    sh = Image.new('RGBA', (bw, bh), (0, 0, 0, 0))
-                    ImageDraw.Draw(sh).text((x + 2, y + 4), chunks[i], font=fnt, fill=(0, 0, 0, 160))
-                    img.alpha_composite(sh.filter(ImageFilter.GaussianBlur(4)))
-                    ImageDraw.Draw(img).text((x, y), chunks[i], font=fnt, fill=col + (255,),
-                                             stroke_width=4, stroke_fill=(40, 14, 0, 255))
+                for img, c in ((base, WHITE), (hi, YELLOW)):
+                    shd = Image.new('RGBA', (bw, bh), (0, 0, 0, 0))
+                    ImageDraw.Draw(shd).text((x + 2, y + 4), chunks[i], font=fnt, fill=(0, 0, 0, 160))
+                    img.alpha_composite(shd.filter(ImageFilter.GaussianBlur(4)))
+                    ImageDraw.Draw(img).text((x, y), chunks[i], font=fnt, fill=c + (255,),
+                                             stroke_width=4, stroke_fill=(30, 6, 30, 255))
                 boxes[i] = (int(x - 4), int(y - 8), int(x + widths[i] + 4), int(y + lh))
                 x += widths[i]
         LYR.append(dict(base=np.array(base), hi=np.array(hi), boxes=boxes, notes=ns,
@@ -572,11 +697,10 @@ CAPTIONS = [  # zusätzliche Untertitel ohne Gesang (Start, Ende, Text)
     (40.6, 41.35, '(Gitarrensolo!)'),
 ]
 
-# Große Wörter im Refrain (Zeit, Wort, Farbe)
-BIGWORDS = [(28.0, 'OYE!', GOLD), (28.5, 'COMO', CYAN), (29.0, 'WAU!', PINK),
-            (30.0, 'WAU!', GOLD), (30.25, 'WAU!', PINK),
-            (32.0, 'LORD', GOLD), (32.5, 'BILLY', PINK), (33.0, 'SINGT', CYAN),
-            (33.5, 'FÜR DICH', GOLD), (34.5, 'AUUU!', PINK)]
+BIGWORDS = [(28.0, 'OYE!', YELLOW), (28.5, 'COMO', CYAN), (29.0, 'WAU!', PINK),
+            (30.0, 'WAU!', YELLOW), (30.25, 'WAU!', PINK),
+            (32.0, 'LORD', YELLOW), (32.5, 'BILLY', PINK), (33.0, 'SINGT', CYAN),
+            (33.5, 'FÜR DICH', YELLOW), (34.5, 'AUUU!', PINK)]
 
 
 def credits_sprite():
@@ -585,12 +709,12 @@ def credits_sprite():
     w = int(max(f.getlength(s) for s, f in lines)) + 60
     hgt = 52 * len(lines) + 50
     img = Image.new('RGBA', (w, hgt), (0, 0, 0, 0))
-    sh = Image.new('RGBA', (w, hgt), (0, 0, 0, 0))
+    shd = Image.new('RGBA', (w, hgt), (0, 0, 0, 0))
     y = 20
     for s, f in lines:
-        ImageDraw.Draw(sh).text((22, y + 3), s, font=f, fill=(0, 0, 0, 200))
+        ImageDraw.Draw(shd).text((22, y + 3), s, font=f, fill=(0, 0, 0, 230), stroke_width=3, stroke_fill=(0, 0, 0, 230))
         y += 52
-    img.alpha_composite(sh.filter(ImageFilter.GaussianBlur(5)))
+    img.alpha_composite(shd.filter(ImageFilter.GaussianBlur(4)))
     y = 20
     for s, f in lines:
         ImageDraw.Draw(img).text((20, y), s, font=f, fill=(255, 255, 255, 255))
@@ -603,8 +727,8 @@ def bug_sprite():
     img = Image.new('RGBA', (300, 170), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.text((18, 14), 'WAU', font=font(F_BLACK, 92), fill=(255, 255, 255, 235),
-           stroke_width=3, stroke_fill=(0, 0, 0, 120))
-    d.rounded_rectangle((176, 104, 262, 150), radius=10, fill=(255, 60, 150, 240))
+           stroke_width=4, stroke_fill=(0, 0, 0, 200))
+    d.rounded_rectangle((176, 104, 262, 150), radius=10, fill=PINK + (240,))
     d.text((186, 104), 'TV', font=font(F_BLACK, 40), fill=(255, 255, 255, 255))
     img = img.rotate(8, resample=Image.BICUBIC, expand=True)
     return np.array(img)
@@ -613,33 +737,43 @@ def bug_sprite():
 def premiere_sprite():
     img = Image.new('RGBA', (420, 90), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle((4, 4, 416, 86), radius=14, fill=(255, 60, 150, 235))
+    d.rounded_rectangle((4, 4, 416, 86), radius=14, fill=PINK + (235,), outline=(0, 0, 0, 255), width=4)
     d.text((24, 14), 'WELTPREMIERE', font=font(F_BLACK, 50), fill=(255, 255, 255, 255))
+    return np.array(img)
+
+
+def marquee_strip(ink):
+    fnt = font(F_BLACK, 210)
+    txt = 'OYE COMO WAU • LORD BILLY • '
+    w = int(fnt.getlength(txt)) + 10
+    img = Image.new('RGBA', (w, 260), (0, 0, 0, 0))
+    ImageDraw.Draw(img).text((0, 0), txt, font=fnt, fill=ink + (120,), stroke_width=6, stroke_fill=ink + (255,))
     return np.array(img)
 
 
 def build_sprites():
     SPR['mic'] = build_mic()
-    SPR['title'] = text_sprite('LORD BILLY', font(F_BLACK, 150), GOLD, stroke=8, shadow=14)
-    SPR['sub'] = text_sprite('Chow Chow · 6 Jahre', font(F_BOLD, 56), WHITE, stroke=4)
-    SPR['sings'] = text_sprite('singt', font(F_ITAL, 52), WHITE, stroke=4)
-    SPR['song'] = text_sprite('»Oye Como Wau«', font(F_BLACK, 92), ORANGE, stroke=6, stroke_fill=(50, 10, 0))
-    SPR['style'] = text_sprite('Latin-Rock à la Santana', font(F_BOLD, 46), WHITE, stroke=4)
-    SPR['solo'] = text_sprite('GITARRENSOLO!', font(F_BLACK, 112), PINK, stroke=7, stroke_fill=(40, 0, 20))
-    SPR['end1'] = text_sprite('LORD BILLY', font(F_BLACK, 140), GOLD, stroke=8, shadow=14)
-    SPR['end2'] = text_sprite('Danke fürs Zuhören – Wau!', font(F_ITAL, 50), WHITE, stroke=4)
+    SPR['title'] = text_sprite('LORD BILLY', font(F_BLACK, 150), YELLOW, stroke=9, stroke_fill=(20, 0, 30), shadow=14)
+    SPR['sub'] = text_sprite('Chow Chow · 6 Jahre', font(F_BOLD, 56), WHITE, stroke=5, stroke_fill=(20, 0, 30))
+    SPR['sings'] = text_sprite('singt', font(F_ITAL, 52), WHITE, stroke=5, stroke_fill=(20, 0, 30))
+    SPR['song'] = text_sprite('»Oye Como Wau«', font(F_BLACK, 92), PINK, stroke=7, stroke_fill=(20, 0, 30))
+    SPR['style'] = text_sprite('Latin-Rock à la Santana', font(F_BOLD, 46), WHITE, stroke=5, stroke_fill=(20, 0, 30))
+    SPR['solo'] = text_sprite('GITARRENSOLO!', font(F_BLACK, 112), PINK, stroke=8, stroke_fill=(20, 0, 30))
+    SPR['end1'] = text_sprite('LORD BILLY', font(F_BLACK, 140), YELLOW, stroke=9, stroke_fill=(20, 0, 30), shadow=14)
+    SPR['end2'] = text_sprite('Danke fürs Zuhören – Wau!', font(F_ITAL, 50), WHITE, stroke=5, stroke_fill=(20, 0, 30))
     SPR['credits'] = credits_sprite()
     SPR['bug'] = bug_sprite()
     SPR['premiere'] = premiere_sprite()
+    SPR['marquee'] = {c: marquee_strip(c) for c in (PINK, YELLOW, PURPLE)}
     for i, (_, _, txt) in enumerate(CAPTIONS):
-        SPR[f'cap{i}'] = text_sprite(txt, font(F_ITAL, 50), WHITE, stroke=4, shadow=8)
-    SPR['big'] = [text_sprite(w, font(F_BLACK, 170), c, stroke=9, stroke_fill=(20, 0, 30), shadow=12)
+        SPR[f'cap{i}'] = text_sprite(txt, font(F_ITAL, 50), WHITE, stroke=5, stroke_fill=(20, 0, 30), shadow=8)
+    SPR['big'] = [text_sprite(w, font(F_BLACK, 170), c, stroke=10, stroke_fill=(20, 0, 30), shadow=12)
                   for _, w, c in BIGWORDS]
     sym = font(F_SYM, 96)
     SPR['notes'] = []
     for g in '♪♫♩♬':
-        for col in (GOLD, ORANGE, PINK, WHITE):
-            SPR['notes'].append(text_sprite(g, sym, col, stroke=4, stroke_fill=(40, 10, 0), shadow=6))
+        for c in (YELLOW, PINK, CYAN, WHITE):
+            SPR['notes'].append(text_sprite(g, sym, c, stroke=5, stroke_fill=(20, 0, 30), shadow=6))
 
 
 def window(t, a, b, fade=0.25):
@@ -660,10 +794,10 @@ def draw_lyrics(F, t):
             xe = int(x0 + p * (x1 - x0))
             spr[y0:y1, x0:xe] = L['hi'][y0:y1, x0:xe]
         rise = 18 * (1 - smooth((t - L['vis0']) / 0.25))
-        blend(F, spr, W / 2, 1650 + rise, al)
+        blend(F, spr, W / 2, 1700 + rise, al)
     for i, (a, b, _) in enumerate(CAPTIONS):
         if a <= t < b:
-            blend(F, SPR[f'cap{i}'], W / 2, 1660, window(t, a, b, 0.3))
+            blend(F, SPR[f'cap{i}'], W / 2, 1710, window(t, a, b, 0.3))
 
 
 def draw_bigwords(F, t):
@@ -674,39 +808,34 @@ def draw_bigwords(F, t):
         a = t - t0
         sc = 1.0 + 0.55 * np.exp(-a / 0.06)
         ang = 6 if i % 2 == 0 else -6
-        blend(F, xform(SPR['big'][i], sc, ang), W / 2, 330, smooth(a / 0.04) * smooth((t1 - t) / 0.1))
+        blend(F, xform(SPR['big'][i], sc, ang), W / 2, 250, smooth(a / 0.04) * smooth((t1 - t) / 0.1))
 
 
 def draw_titles(F, t):
-    # Intro
     if t < 4.2:
         a = window(t, 0.25, 3.85, 0.35)
         sc = 0.85 + 0.15 * smooth((t - 0.25) / 0.5) + 0.04 * kick_env(t)
         blend(F, xform(SPR['title'], sc), W / 2, 270, a)
         blend(F, SPR['sub'], W / 2, 400, window(t, 0.7, 3.85, 0.35))
-        blend(F, SPR['sings'], W / 2, 1450, window(t, 1.5, 3.85, 0.3))
-        blend(F, xform(SPR['song'], 0.9 + 0.1 * smooth((t - 1.8) / 0.4)), W / 2, 1545, window(t, 1.8, 3.85, 0.3))
-        blend(F, SPR['style'], W / 2, 1650, window(t, 2.3, 3.85, 0.3))
+        blend(F, SPR['sings'], W / 2, 1500, window(t, 1.5, 3.85, 0.3))
+        blend(F, xform(SPR['song'], 0.9 + 0.1 * smooth((t - 1.8) / 0.4)), W / 2, 1595, window(t, 1.8, 3.85, 0.3))
+        blend(F, SPR['style'], W / 2, 1700, window(t, 2.3, 3.85, 0.3))
         blink = 1.0 if int(t * 2.5) % 2 == 0 else 0.55
         blend(F, SPR['premiere'], 60 + SPR['premiere'].shape[1] / 2, 110, window(t, 0.3, 3.9, 0.2) * blink)
-    # Sender-Logo
     if 0.6 <= t < 44.6:
         b = SPR['bug']
-        blend(F, b, W - 40 - b.shape[1] / 2, 50 + b.shape[0] / 2, 0.8 * window(t, 0.6, 44.6, 0.4))
-    # Credits unten links (wie im Musikfernsehen: am Anfang und am Ende)
+        blend(F, b, W - 40 - b.shape[1] / 2, 50 + b.shape[0] / 2, 0.85 * window(t, 0.6, 44.6, 0.4))
     c = SPR['credits']
     for a, bnd in ((4.4, 9.6), (42.4, 44.8)):
         if a <= t < bnd:
-            blend(F, c, 40 + c.shape[1] / 2, 1330 + c.shape[0] / 2, window(t, a, bnd, 0.35))
-    # Solo
+            blend(F, c, 40 + c.shape[1] / 2, 1380 + c.shape[0] / 2, window(t, a, bnd, 0.35))
     for a, b in ((36.0, 39.0), (40.0, 42.0)):
         if a <= t < b:
             sc = 1.0 + 0.1 * kick_env(t)
             blend(F, xform(SPR['solo'], sc, 4 * np.sin(t * 6)), W / 2, 300, window(t, a, b, 0.15))
-    # Abspann
     if t >= 42.5:
-        blend(F, SPR['end1'], W / 2, 320, window(t, 42.5, 50, 0.5))
-        blend(F, SPR['end2'], W / 2, 450, window(t, 43.0, 50, 0.5))
+        blend(F, SPR['end1'], W / 2, 300, window(t, 42.5, 50, 0.5))
+        blend(F, SPR['end2'], W / 2, 430, window(t, 43.0, 50, 0.5))
 
 
 # ----------------------------------------------------------------- Noten-Partikel
@@ -720,10 +849,10 @@ def build_particles():
         for j in range(cnt):
             ts = n['t0'] + j * 0.35
             sh = shot_at(ts)
-            if 'split' in sh:
-                xc, y, half = W / 2, H / 2, 150
+            if sh['bg'] == 'grid':
+                xc, y, half = W / 2, H / 2, 200
             else:
-                g = mouth_geom(sh['img'], camera(sh, ts))
+                g = mouth_geom(sh['img'], shot_cam(sh, ts))
                 xc, y, half = g['xc'], g['lip'] + g['J'] * 0.2, g['half']
             side = rng.choice([-1, 1])
             PARTICLES.append(dict(
@@ -747,50 +876,60 @@ def draw_particles(F, t):
 
 # ----------------------------------------------------------------- Bild komponieren
 MOUTH = None
+GRAIN = []
 
 
 def init_worker():
     global MOUTH
-    load_images()
+    load_cutouts()
     build_sprites()
     build_lyrics()
     build_particles()
-    build_grain()
+    rng = np.random.default_rng(3)
+    for _ in range(6):
+        GRAIN.append(cv2.GaussianBlur((rng.standard_normal((H // 2, W // 2)) * 0.018).astype(np.float32), (0, 0), 0.8))
     MOUTH = TL.mouth_open(np.arange(NF) / FPS)
+
+
+def vhs(F, t, t_cut, fi):
+    """Kurzes VHS-Rauschen mit Bildversatz direkt nach einem Schnitt."""
+    a = t - t_cut
+    if not (0 <= a < 0.12):
+        return F
+    rng = np.random.default_rng(fi)
+    k = 1 - a / 0.12
+    noise = rng.random((H // 4, W // 4)).astype(np.float32)
+    noise = cv2.resize(noise, (W, H), interpolation=cv2.INTER_NEAREST)[..., None]
+    out = F * (1 - 0.55 * k) + noise * 0.55 * k
+    for _ in range(6):   # horizontale Risse
+        y = int(rng.integers(0, H - 60))
+        h = int(rng.integers(10, 60))
+        out[y:y + h] = np.roll(out[y:y + h], int(rng.integers(-80, 80)), axis=1)
+    return out
 
 
 def render(fi):
     t = fi / FPS
     sh = shot_at(t)
     sec = TL.section_at(t)
-    photo = photo_frame(t, float(MOUTH[fi]))
-    F = photo.astype(np.float32) / 255.0
-    # Farbstimmung je Abschnitt
-    if 'tint' in sh:
-        hi, lo = TINTS[sh['tint']]
-        F = tone(F, hi, lo, 0.24)
-    elif sec == 'chorus':
-        F = tone(F, *CHORUS_TONE, 0.24)
-    mult, add = light_maps(t)
-    F *= mult
-    F += add * (1 - F)
+    F = render_shot(sh, t, float(MOUTH[fi]))
     # Stroboskop / Blitze
     if sec == 'chorus':
         snares = np.array([TL.bt(b, k) for b in range(14, 18) for k in (1, 3)])
-        F += (1 - F) * 0.22 * env_after(snares, t, 0.05)
+        F += (1 - F) * 0.2 * env_after(snares, t, 0.05)
     if sec == 'solo':
-        col = np.array(TINTS[int(t) % 3][0], np.float32)
-        F += (col - F) * 0.16 * env_after(BEATS, t, 0.06)
+        F += (1 - F) * 0.15 * env_after(BEATS, t, 0.05)
     for s in SHOTS:
         if s['flash'] and 0 <= t - s['t0'] < 0.25:
-            F += (1 - F) * 0.55 * np.exp(-(t - s['t0']) / 0.07)
+            F += (1 - F) * 0.5 * np.exp(-(t - s['t0']) / 0.06)
+        if s.get('vhs'):
+            F = vhs(F, t, s['t0'], fi)
     # RGB-Versatz auf Kicks und Schnitten
     cut = max([np.exp(-(t - s['t0']) / 0.1) for s in SHOTS if 0 <= t - s['t0'] < 0.4] + [0])
-    d = int(round((14 if sec in ('chorus', 'solo') else 6) * kick_env(t) + 10 * cut))
+    d = int(round((12 if sec in ('chorus', 'solo') else 5) * kick_env(t) + 10 * cut))
     if d > 0:
         F[:, d:, 0] = F[:, :-d, 0].copy()
         F[:, :-d, 2] = F[:, d:, 2].copy()
-    # Filmkorn
     g = cv2.resize(GRAIN[(fi // 3) % len(GRAIN)], (W, H), interpolation=cv2.INTER_LINEAR)
     F += g[..., None]
     np.clip(F, 0, 1, out=F)
@@ -798,7 +937,7 @@ def render(fi):
     draw_bigwords(F, t)
     draw_titles(F, t)
     draw_lyrics(F, t)
-    F *= smooth(t / 0.5) * smooth((TL.DURATION - t) / 0.8)
+    F *= smooth(t / 0.4) * smooth((TL.DURATION - t) / 0.8)
     return (np.clip(F, 0, 1) * 255 + 0.5).astype(np.uint8)
 
 
@@ -829,8 +968,8 @@ def main():
     write_srt(os.path.splitext(mp4)[0] + '.srt')
     cmd = ['ffmpeg', '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
            '-s', f'{W}x{H}', '-r', str(FPS), '-i', '-', '-i', wav,
-           '-c:v', 'libx264', '-preset', 'slow', '-crf', '23', '-maxrate', '9M', '-bufsize', '18M', '-pix_fmt', 'yuv420p',
-           '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', mp4]
+           '-c:v', 'libx264', '-preset', 'slow', '-crf', '23', '-maxrate', '9M', '-bufsize', '18M',
+           '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', mp4]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     with Pool(os.cpu_count(), initializer=init_worker) as pool:
         for i, fr in enumerate(pool.imap(render, range(NF), chunksize=4)):

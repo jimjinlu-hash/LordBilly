@@ -1,0 +1,29 @@
+{
+  "A": {
+    "file": "bilder/freigestellt/billy_A.png",
+    "scale": 0.75,
+    "source": "bilder/d31ad93b38b30e8aafbaaa2372b6c3cc.jpeg",
+    "size": [
+      3024,
+      4032
+    ]
+  },
+  "B": {
+    "file": "bilder/freigestellt/billy_B.png",
+    "scale": 1.0,
+    "source": "bilder/ed453128c9dc6df5e54131ae1af421_livephoto.jpeg",
+    "size": [
+      1920,
+      2560
+    ]
+  },
+  "C": {
+    "file": "bilder/freigestellt/billy_C.png",
+    "scale": 1.0,
+    "source": "bilder/IMG_1332.jpeg",
+    "size": [
+      1080,
+      1080
+    ]
+  }
+}
