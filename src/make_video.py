@@ -11,6 +11,12 @@ Karaoke-Untertitel der gerade gesungenen Zeile.
 Aufruf:
   python3 src/make_video.py build/song.wav video/LordBilly_OyeComoWau.mp4
   python3 src/make_video.py --preview 13.2,22.0 out_dir     # Einzelbilder
+  python3 src/make_video.py --ohne-ton video/LordBilly_ohneTon.mp4
+
+Die Fassung --ohne-ton hat keine Tonspur, keine Liedtext-Untertitel und keine
+taktgenauen Effekte. Billy singt darin frei (Maul, Kopf, Augen), damit man in
+Instagram oder TikTok einen Song aus deren lizenzierter Musikbibliothek
+darunterlegen kann.
 """
 import json
 import os
@@ -25,6 +31,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import timeline as TL
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FREE = os.environ.get('LB_OHNE_TON') == '1'   # Fassung ohne Ton (siehe oben)
 W, H = 1080, 1920          # Rendergröße
 OUT_W, OUT_H = 720, 1280   # Größe des fertigen Videos
 TARGET_MB = 18.5           # Zielgröße der MP4-Datei
@@ -133,6 +140,8 @@ def env_after(times, t, tau):
 
 
 def kick_env(t):
+    if FREE:
+        return 0.0
     return env_after(KICKS, t, 0.13)
 
 
@@ -227,7 +236,7 @@ def make_cam(k, fr, t0, t1, t, z=(1.0, 1.0), rot=(0.0, 0.0), scale=1.0, anchor=N
     L = np.array([[c, sn], [-sn, c]]) / s_eff
     tr = np.array([ax, ay]) - L @ np.array([cx, cy])
     # Squash & Stretch um die Pfoten: auf dem Kick kurz gestaucht, danach gestreckt
-    sq = (0.05 if hot else 0.03) * ke - 0.012 * np.exp(-((t % TL.BEAT) - 0.22) ** 2 / 0.006)
+    sq = (0.05 if hot else 0.03) * ke - (0 if FREE else 0.012 * np.exp(-((t % TL.BEAT) - 0.22) ** 2 / 0.006))
     S = np.diag([1 + 0.5 * sq, 1 - sq])
     fo = L @ np.array(FEET[k]) + tr
     L2 = S @ L
@@ -260,6 +269,44 @@ def mouth_geom(k, cam):
 
 # ----------------------------------------------------------------- Bewegung: Kopf und Augen
 POSE = {}
+FREE_OPEN = {'a': 1.0, 'o': 0.8, 'e': 0.65, 'u': 0.5, 'au': (1.0, 0.5), 'ai': (1.0, 0.45)}
+
+
+def free_notes():
+    """Frei gesungene Silben (ohne festen Song): Phrasen mit Pausen und langen Schlusstönen."""
+    rng = np.random.default_rng(21)
+    notes, t = [], 4.6
+    vowels = ['a', 'a', 'o', 'o', 'e', 'u', 'au', 'ai', 'a', 'o']
+    while t < 43.0:
+        end = min(t + rng.uniform(2.4, 4.2), 43.6)
+        while t < end - 0.15:
+            d = float(rng.choice([0.2, 0.25, 0.3, 0.35, 0.45, 0.6]))
+            if end - t < 1.9 and rng.random() < 0.6:
+                d = end - t
+            notes.append(dict(t0=t, t1=t + d, midi=int(rng.integers(64, 80)),
+                              vowel=vowels[int(rng.integers(len(vowels)))], text=''))
+            t += d + rng.uniform(0.02, 0.08)
+        t = end + rng.uniform(0.5, 1.2)
+    return notes
+
+
+def notes_list():
+    return free_notes() if FREE else TL.vocal_notes()
+
+
+def free_mouth(t):
+    from scipy import signal
+    grid = np.arange(0, TL.DURATION + 0.5, 0.001)
+    val = np.zeros_like(grid)
+    for n in free_notes():
+        i0, i1 = int(n['t0'] * 1000), int(n['t1'] * 1000)
+        m = FREE_OPEN[n['vowel']]
+        x = np.linspace(0, 1, i1 - i0)
+        v = m[0] + (m[1] - m[0]) * np.clip((x - 0.35) / 0.5, 0, 1) if isinstance(m, tuple) else np.full(i1 - i0, m)
+        v[:40] = 0.15                      # kurzer Konsonant am Silbenanfang
+        val[i0:i1] = v
+    val = signal.sosfiltfilt(signal.butter(2, 9, fs=1000, output='sos'), val)
+    return np.clip(np.interp(t, grid, val), 0, 1.05)
 
 
 def compute_pose():
@@ -267,12 +314,16 @@ def compute_pose():
     from scipy import signal
     t = np.arange(NF) / FPS
     theta, lift, scl, vib = (np.zeros(NF) for _ in range(4))
-    for i, b in enumerate(BEATS):        # Nicken im Takt, abwechselnd links/rechts
-        e = np.where(t >= b, np.exp(-(t - b) / 0.18), 0)
-        theta += 2.4 * (1 if i % 2 == 0 else -1) * e
-        lift += 0.018 * e
+    if FREE:                             # ohne festen Takt: ruhiges Wiegen
+        theta += 2.2 * np.sin(2 * np.pi * 0.45 * t)
+        lift += 0.012 * np.sin(2 * np.pi * 0.9 * t)
+    else:
+        for i, b in enumerate(BEATS):    # Nicken im Takt, abwechselnd links/rechts
+            e = np.where(t >= b, np.exp(-(t - b) / 0.18), 0)
+            theta += 2.4 * (1 if i % 2 == 0 else -1) * e
+            lift += 0.018 * e
     eyes = np.zeros(NF)
-    for j, n in enumerate(TL.vocal_notes()):
+    for j, n in enumerate(notes_list()):
         d = n['t1'] - n['t0']
         a = t - n['t0']
         on = (a >= 0) & (t < n['t1'] + 0.15)
@@ -830,9 +881,19 @@ BIGWORDS = [(28.0, 'OYE!', YELLOW), (28.5, 'COMO', CYAN), (29.0, 'WAU!', PINK),
             (33.5, 'FÜR DICH', YELLOW), (34.5, 'AUUU!', PINK)]
 
 
+BIGWORDS_FREE = [(28.0, 'WAU!', YELLOW), (28.6, 'YEAH!', CYAN), (30.0, 'LORD', PINK), (30.6, 'BILLY', YELLOW),
+                 (32.0, 'WAU!', CYAN), (33.0, 'SING!', PINK), (34.5, 'AUUU!', YELLOW)]
+if FREE:
+    BIGWORDS = BIGWORDS_FREE
+    CAPTIONS = []
+
+
 def credits_sprite():
     lines = [('Lord Billy', font(F_XBOLD, 46)), ('»Oye Como Wau«', font(F_SEMI, 40)),
              ('Löwenmähne', font(F_SEMI, 34)), ('Chow Chow Records', font(F_SEMI, 34))]
+    if FREE:
+        lines = [('Lord Billy', font(F_XBOLD, 46)), ('Live im WAU-TV-Studio', font(F_SEMI, 40)),
+                 ('Chow Chow · 6 Jahre', font(F_SEMI, 34))]
     w = int(max(f.getlength(s) for s, f in lines)) + 60
     hgt = 52 * len(lines) + 50
     img = Image.new('RGBA', (w, hgt), (0, 0, 0, 0))
@@ -871,7 +932,7 @@ def premiere_sprite():
 
 def marquee_strip(ink):
     fnt = font(F_BLACK, 210)
-    txt = 'OYE COMO WAU • LORD BILLY • '
+    txt = 'LORD BILLY • WAU TV • ' if FREE else 'OYE COMO WAU • LORD BILLY • '
     w = int(fnt.getlength(txt)) + 10
     img = Image.new('RGBA', (w, 260), (0, 0, 0, 0))
     ImageDraw.Draw(img).text((0, 0), txt, font=fnt, fill=ink + (120,), stroke_width=6, stroke_fill=ink + (255,))
@@ -888,6 +949,11 @@ def build_sprites():
     SPR['solo'] = text_sprite('GITARRENSOLO!', font(F_BLACK, 112), PINK, stroke=8, stroke_fill=(20, 0, 30))
     SPR['end1'] = text_sprite('LORD BILLY', font(F_BLACK, 140), YELLOW, stroke=9, stroke_fill=(20, 0, 30), shadow=14)
     SPR['end2'] = text_sprite('Danke fürs Zuhören – Wau!', font(F_ITAL, 50), WHITE, stroke=5, stroke_fill=(20, 0, 30))
+    if FREE:
+        SPR['sings'] = text_sprite('heute live', font(F_ITAL, 52), WHITE, stroke=5, stroke_fill=(20, 0, 30))
+        SPR['song'] = text_sprite('»Billy singt!«', font(F_BLACK, 92), PINK, stroke=7, stroke_fill=(20, 0, 30))
+        SPR['style'] = text_sprite('Latin-Rock-Special', font(F_BOLD, 46), WHITE, stroke=5, stroke_fill=(20, 0, 30))
+        SPR['end2'] = text_sprite('Danke fürs Zuschauen – Wau!', font(F_ITAL, 50), WHITE, stroke=5, stroke_fill=(20, 0, 30))
     SPR['credits'] = credits_sprite()
     SPR['bug'] = bug_sprite()
     SPR['premiere'] = premiere_sprite()
@@ -956,7 +1022,7 @@ def draw_titles(F, t):
     for a, bnd in ((4.4, 9.6), (42.4, 44.8)):
         if a <= t < bnd:
             blend(F, c, 40 + c.shape[1] / 2, 1380 + c.shape[0] / 2, window(t, a, bnd, 0.35))
-    for a, b in ((36.0, 39.0), (40.0, 42.0)):
+    for a, b in (() if FREE else ((36.0, 39.0), (40.0, 42.0))):
         if a <= t < b:
             sc = 1.0 + 0.1 * kick_env(t)
             blend(F, xform(SPR['solo'], sc, 4 * np.sin(t * 6)), W / 2, 300, window(t, a, b, 0.15))
@@ -971,7 +1037,7 @@ PARTICLES = []
 
 def build_particles():
     rng = np.random.default_rng(6)
-    for n in TL.vocal_notes():
+    for n in notes_list():
         cnt = 1 + int(n['t1'] - n['t0'] > 0.6) + int(n['t1'] - n['t0'] > 1.2)
         for j in range(cnt):
             ts = n['t0'] + j * 0.35
@@ -1009,9 +1075,10 @@ def init_worker():
     global MOUTH
     load_cutouts()
     build_sprites()
-    build_lyrics()
+    if not FREE:
+        build_lyrics()
     build_particles()
-    MOUTH = TL.mouth_open(np.arange(NF) / FPS)
+    MOUTH = free_mouth(np.arange(NF) / FPS) if FREE else TL.mouth_open(np.arange(NF) / FPS)
     compute_pose()
 
 
@@ -1038,10 +1105,10 @@ def render(fi):
     sec = TL.section_at(t)
     F = render_shot(sh, t, fi)
     # Stroboskop / Blitze
-    if sec == 'chorus':
+    if sec == 'chorus' and not FREE:
         snares = np.array([TL.bt(b, k) for b in range(14, 18) for k in (1, 3)])
         F += (1 - F) * 0.2 * env_after(snares, t, 0.05)
-    if sec == 'solo':
+    if sec == 'solo' and not FREE:
         F += (1 - F) * 0.15 * env_after(BEATS, t, 0.05)
     for s in SHOTS:
         if s['flash'] and 0 <= t - s['t0'] < 0.25:
@@ -1085,9 +1152,13 @@ def main():
             fr = render(int(round(t * FPS)))
             Image.fromarray(fr).save(os.path.join(out, f'frame_{t:05.2f}.jpg'), quality=90)
         return
-    wav, mp4 = sys.argv[1], sys.argv[2]
+    if sys.argv[1] == '--ohne-ton':
+        wav, mp4 = None, sys.argv[2]
+    else:
+        wav, mp4 = sys.argv[1], sys.argv[2]
     init_worker()
-    write_srt(os.path.splitext(mp4)[0] + '.srt')
+    if not FREE:
+        write_srt(os.path.splitext(mp4)[0] + '.srt')
     build = os.path.join(ROOT, 'build')
     os.makedirs(build, exist_ok=True)
     raw = os.path.join(build, 'video_raw.mp4')
@@ -1104,17 +1175,20 @@ def main():
     proc.stdin.close()
     proc.wait()
     # 2) Zwei-Pass-Encoding auf eine feste Zielgröße (unter 20 MB)
-    vbit = int(TARGET_MB * 8e6 / TL.DURATION - 128e3)
+    vbit = int(TARGET_MB * 8e6 / TL.DURATION - (0 if FREE else 128e3))
     log = os.path.join(build, 'x264pass')
     common = ['-c:v', 'libx264', '-preset', 'slow', '-b:v', str(vbit), '-maxrate', str(int(vbit * 1.6)),
               '-bufsize', str(int(vbit * 2)), '-pix_fmt', 'yuv420p', '-passlogfile', log]
     subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', raw] + common + ['-pass', '1', '-an', '-f', 'mp4', os.devnull],
                    check=True)
-    subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', raw, '-i', wav] + common +
-                   ['-pass', '2', '-c:a', 'aac', '-b:a', '128k', '-shortest', '-movflags', '+faststart', mp4],
-                   check=True)
+    audio = ['-an'] if FREE else ['-c:a', 'aac', '-b:a', '128k', '-shortest']
+    subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', raw] + ([] if FREE else ['-i', wav]) + common +
+                   ['-pass', '2'] + audio + ['-movflags', '+faststart', mp4], check=True)
     print('fertig:', mp4, f'{os.path.getsize(mp4) / 1e6:.1f} MB')
 
 
 if __name__ == '__main__':
+    if '--ohne-ton' in sys.argv and not FREE:   # Modus vor dem Start der Worker festlegen
+        os.environ['LB_OHNE_TON'] = '1'
+        os.execv(sys.executable, [sys.executable] + sys.argv)
     main()

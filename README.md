@@ -11,11 +11,20 @@ Hammond-Orgel und singender Leadgitarre.
 ▶️ **Video:** [`video/LordBilly_OyeComoWau.mp4`](video/LordBilly_OyeComoWau.mp4)
 (720×1280 Hochformat, 30 fps, 45 s, mit Ton, ca. 19 MB)
 
+## Fassung ohne Ton (für Instagram oder TikTok)
+
+[`video/LordBilly_ohneTon.mp4`](video/LordBilly_ohneTon.mp4) hat keine
+Tonspur und keine Liedtext-Untertitel. Billy singt darin frei mit Maul,
+Kopf und Augen, ohne festes Tempo und ohne bestimmte Worte. Beim Hochladen
+in Instagram (Reels) oder TikTok kann man einen Song aus der lizenzierten
+Musikbibliothek der App darunterlegen. Die App kümmert sich um die Rechte.
+
 ## Inhalt
 
 | Pfad | Was |
 |---|---|
 | `video/LordBilly_OyeComoWau.mp4` | das fertige Musikvideo mit eingebrannten Karaoke-Untertiteln |
+| `video/LordBilly_ohneTon.mp4` | dieselbe Show ohne Ton, zum Unterlegen eines Songs in Instagram/TikTok |
 | `video/LordBilly_OyeComoWau.srt` | die gesungenen Zeilen zusätzlich als Untertiteldatei |
 | `video/poster.jpg` | Vorschaubild |
 | `audio/LordBilly_OyeComoWau.mp3` | nur der Song |
@@ -98,5 +107,7 @@ python3 src/make_video.py build/song.wav video/LordBilly_OyeComoWau.mp4
   Augen, Unterkiefer, Hüpfen), Mikrofon, MTV-Effekte, Titel und
   Karaoke-Untertitel; rendert in 1080×1920 und komprimiert per
   Zwei-Pass-Encoding auf 720×1280 unter 20 MB
+
+Fassung ohne Ton: `python3 src/make_video.py --ohne-ton video/LordBilly_ohneTon.mp4`
 
 Einzelne Vorschaubilder: `python3 src/make_video.py --preview 13.1,29.3 vorschau/`
