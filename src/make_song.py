@@ -2,11 +2,15 @@
 
 Alles wird hier aus Rohsignalen erzeugt: Congas, Cowbell, Clave, Shaker,
 Drums, Bass, Hammond-Orgel mit Leslie, verzerrte Leadgitarre und Billys
-Hunde-Gesang (Formant-Synthese).
+Gesang: eine tiefe Männerstimme (MBROLA-Sprachsynthese, Stimme de6), Note
+für Note auf die Melodie gestimmt, gedoppelt und mit Sub-Oktave.
 
 Aufruf:  python3 src/make_song.py build/song.wav
 """
+import os
 import sys
+import subprocess
+import tempfile
 import numpy as np
 from scipy import signal
 from scipy.io import wavfile
@@ -367,59 +371,75 @@ def make_guitar():
     return x
 
 
+def mbrola_render(segs, voice='de6', pitch_factor=1.0, transpose=0.0):
+    """Rendert die Phonemfolge mit MBROLA und liefert ein Mono-Signal (44,1 kHz)."""
+    from math import gcd
+    pho = TL.pho_file(segs, pitch_factor, transpose)
+    with tempfile.TemporaryDirectory() as d:
+        p, w = os.path.join(d, 'v.pho'), os.path.join(d, 'v.wav')
+        with open(p, 'w') as f:
+            f.write(pho)
+        subprocess.run(['mbrola', '-e', f'/usr/share/mbrola/{voice}/{voice}', p, w],
+                       check=True, capture_output=True)
+        sr, x = wavfile.read(w)
+    x = x.astype(np.float64) / 32768
+    g = gcd(SR, sr)
+    x = signal.resample_poly(x, SR // g, sr // g)
+    out = np.zeros(N)
+    out[:min(N, len(x))] = x[:N]
+    return out
+
+
+def shift(x, sec):
+    d = int(sec * SR)
+    return np.concatenate([np.zeros(d), x[:-d]]) if d > 0 else x
+
+
+def compress(x, thr_db=-20, ratio=3.5, att=0.005, rel=0.12):
+    env = np.abs(x)
+    a_att, a_rel = np.exp(-1 / (att * SR)), np.exp(-1 / (rel * SR))
+    # schnelle Hüllkurve per Blockverarbeitung (Peak je 2 ms, dann geglättet)
+    blk = int(0.002 * SR)
+    nb = len(x) // blk + 1
+    pk = np.array([env[i * blk:(i + 1) * blk].max() if i * blk < len(x) else 0 for i in range(nb)])
+    sm = np.zeros_like(pk)
+    for i in range(1, nb):
+        c = a_att ** blk if pk[i] > sm[i - 1] else a_rel ** blk
+        sm[i] = c * sm[i - 1] + (1 - c) * pk[i]
+    lvl = 20 * np.log10(sm + 1e-9)
+    gr = np.where(lvl > thr_db, (thr_db - lvl) * (1 - 1 / ratio), 0.0)
+    gain = 10 ** (np.repeat(gr, blk)[:len(x)] / 20)
+    return x * gain
+
+
 def make_voice():
-    notes = TL.vocal_notes()
-    f0, amp, owner = pitch_curve(notes, N, voice=True)
-    active = amp > 1e-4
-    t_all = np.arange(N) / SR
-    # Formant-Spuren je Sample
-    F = np.zeros((N, 3))
-    F[:] = TL.VOWELS['u']
-    for k, nt in enumerate(notes):
-        sel = owner == k
-        if not sel.any():
-            continue
-        t = t_all[sel] - nt['t0']
-        d = nt['t1'] - nt['t0']
-        v = nt['vowel']
-        v1, v2 = TL.DIPHTHONGS.get(v, (v, v))
-        a = np.array(TL.VOWELS['w'])
-        b = np.array(TL.VOWELS[v1])
-        c = np.array(TL.VOWELS[v2])
-        x1 = np.clip(t / 0.07, 0, 1)[:, None]
-        x1 = x1 * x1 * (3 - 2 * x1)
-        x2 = np.clip((t - 0.55 * d) / (0.3 * d + 1e-3), 0, 1)[:, None]
-        cur = a + (b - a) * x1
-        cur = cur + (c - b) * x2 * x1
-        F[sel] = cur * 1.15   # kleinerer "Hunde-Vokaltrakt"
-    # Formantsprünge glätten (sonst Klicks bei Silbenwechsel)
-    F = signal.sosfiltfilt(signal.butter(2, 30, fs=SR, output='sos'), F, axis=0)
-    BW = np.array([90.0, 120.0, 180.0])
+    """Billys Gesang: tiefe Männerstimme (MBROLA de6), gedoppelt, mit Sub-Oktave."""
+    segs = TL.phonemes()
+    lead = mbrola_render(segs, 'de6')
+    adt = shift(mbrola_render(segs, 'de6', pitch_factor=1.007), 0.021)
+    dbl = shift(mbrola_render(segs, 'de4', pitch_factor=0.994), 0.014)
+    sub = mbrola_render(segs, 'de6', transpose=-12)
+    # Ausblenden des Schlusstons
+    t = np.arange(N) / SR
+    for n in TL.vocal_notes():
+        if n.get('fade'):
+            x = np.clip((t - n['t0']) / (n['t1'] - n['t0'] + 0.3), 0, 1)
+            env = np.where(t >= n['t0'], (1 - x) ** 0.8, 1.0)
+            for v in (lead, adt, dbl, sub):
+                v *= env
 
-    def weights(k, fc, sl):
-        f = k * fc
-        h = 1.0 / k ** 0.9
-        for j in range(3):
-            Fj = F[sl, j]
-            h = h * (Fj ** 2) / np.sqrt((Fj ** 2 - f ** 2) ** 2 + (f * BW[j]) ** 2)
-        return h
+    def eq(x):
+        x = highpass(x, 65, 2)
+        x = x + 0.5 * lowpass(highpass(x, 90), 220)        # Brust / Tiefe
+        x = x + 0.35 * bandpass(x, 2200, 4500)               # Präsenz
+        return x
 
-    sig = additive(f0, weights, active)
-    # Knurr-Einsatz ("rrwau") und Atem
-    growl = np.ones(N)
-    breath = np.zeros(N)
-    for nt in notes:
-        i0 = int(nt['t0'] * SR)
-        t = np.arange(int(0.16 * SR)) / SR
-        g = 1 - 0.4 * (1 - np.exp(-t / 0.01)) * np.exp(-t / 0.06) * (0.5 - 0.5 * np.cos(2 * np.pi * 42 * t))
-        growl[i0:i0 + len(t)] *= g[: N - i0]
-        b = np.minimum(t / 0.01, 1) * np.exp(-t / 0.04)
-        breath[i0:i0 + len(t)] += b[: N - i0]
-    shimmer = 1 + 0.04 * lowpass(rng.standard_normal(N), 25)
-    x = sig * amp * growl * shimmer
-    x += 0.05 * bandpass(rng.standard_normal(N), 1800, 6000) * (amp * 0.35 + breath) * (amp > 1e-3)
-    x = highpass(x, 180)
-    return x
+    lead, adt, dbl, sub = eq(lead), eq(adt), eq(dbl), lowpass(highpass(sub, 45), 900)
+    left = lead + 0.42 * adt + 0.30 * dbl + 0.22 * sub
+    right = lead + 0.30 * adt + 0.42 * shift(dbl, 0.006) + 0.22 * sub
+    st = np.stack([compress(left), compress(right)], axis=1)
+    st = np.tanh(st * 1.4 / np.abs(st).max()) / 1.4      # leichte Röhren-Sättigung
+    return st
 
 
 # ---------------------------------------------------------------- Effekte & Mix
@@ -485,11 +505,12 @@ def main(out_path):
     organ = make_organ()
     guitar = pan_mono(make_guitar(), -0.15)
     guitar = delay(guitar, TL.BEAT * 0.75, fb=0.35, mix=0.28)
-    voice = pan_mono(make_voice(), 0.0)
+    voice = make_voice()
+    voice = voice + 0.16 * delay(voice, 0.11, fb=0.0, mix=1.0, pingpong=False) - 0.16 * voice
 
     stems = {
         'perc': level(perc, -25), 'drums': level(drums, -24), 'bass': level(bass, -21),
-        'organ': level(organ, -25), 'guitar': level(guitar, -19), 'voice': level(voice, -16.5),
+        'organ': level(organ, -25), 'guitar': level(guitar, -20), 'voice': level(voice, -15.5),
     }
     sends = {'perc': 0.12, 'drums': 0.1, 'bass': 0.0, 'organ': 0.2, 'guitar': 0.3, 'voice': 0.32}
     mix = np.zeros((N, 2))
