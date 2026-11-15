@@ -25,7 +25,9 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import timeline as TL
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-W, H = 1080, 1920
+W, H = 1080, 1920          # Rendergröße
+OUT_W, OUT_H = 720, 1280   # Größe des fertigen Videos
+TARGET_MB = 18.5           # Zielgröße der MP4-Datei
 FPS = TL.FPS
 NF = int(round(TL.DURATION * FPS))
 
@@ -57,6 +59,16 @@ GEOM = {
     'C': dict(mouth=dict(x=521, lip=627, gap=9, jaw=683, decay=95, half=52, slope=0.0, amax=19),
               mic=dict(x=592, y=716, r=27, tilt=30)),
 }
+# Augen (Mitte x, y, halbe Breite, halbe Höhe), Kopf (Mitte, Radius, Drehpunkt am Hals), Pfoten
+EYES = {
+    'A': [(1127, 790, 80, 43), (1677, 757, 77, 43)],
+    'B': [(877, 528, 52, 30), (1100, 522, 22, 18)],
+    'C': [(499, 561, 10, 6), (562, 567, 10, 6)],
+}
+HEAD = {'A': dict(c=(1460, 1080), R=820, pivot=(1460, 2050)),
+        'B': dict(c=(880, 640), R=470, pivot=(830, 1250)),
+        'C': dict(c=(552, 615), R=125, pivot=(552, 790))}
+FEET = {'A': (1410, 3950), 'B': (816, 2000), 'C': (550, 1030)}
 # Bildausschnitte: (Quellpunkt x, y, Quellpixel je Ausgabepixel, Ankerpunkt im Bild x, y)
 FRAMES = {
     ('A', 'full'): (1410, 2040, 2.75, 540, 1010),
@@ -196,7 +208,7 @@ def load_cutouts():
 
 
 def make_cam(k, fr, t0, t1, t, z=(1.0, 1.0), rot=(0.0, 0.0), scale=1.0, anchor=None):
-    """Kamera = (Quell-x, Quell-y, Quellpixel je Ausgabepixel, Drehung, Anker-x, Anker-y)."""
+    """Kamera als affine Abbildung Foto -> Bild (2x3-Matrix M), inkl. Stauchen auf dem Beat."""
     cx, cy, s, ax, ay = TILE_FRAMES[k] if fr == 'tile' else FRAMES[(k, fr)]
     if anchor is not None:
         ax, ay = anchor
@@ -209,36 +221,154 @@ def make_cam(k, fr, t0, t1, t, z=(1.0, 1.0), rot=(0.0, 0.0), scale=1.0, anchor=N
     zz *= 1 + (0.045 if hot else 0.02) * ke
     r += (3.0 if hot else 1.6) * np.sin(2 * np.pi * t / (2 * TL.BEAT * 2))   # Wippen im Takt
     ay -= (22 if hot else 10) * ke * (1 if fr != 'tile' else 0.4)              # kleiner Hüpfer auf dem Kick
-    return (cx, cy, s / zz * scale, r, ax, ay)
+    s_eff = s / zz * scale
+    th = np.radians(r)
+    c, sn = np.cos(th), np.sin(th)
+    L = np.array([[c, sn], [-sn, c]]) / s_eff
+    tr = np.array([ax, ay]) - L @ np.array([cx, cy])
+    # Squash & Stretch um die Pfoten: auf dem Kick kurz gestaucht, danach gestreckt
+    sq = (0.05 if hot else 0.03) * ke - 0.012 * np.exp(-((t % TL.BEAT) - 0.22) ** 2 / 0.006)
+    S = np.diag([1 + 0.5 * sq, 1 - sq])
+    fo = L @ np.array(FEET[k]) + tr
+    L2 = S @ L
+    t2 = fo + S @ (tr - fo)
+    return dict(M=np.hstack([L2, t2[:, None]]), s=s_eff, rot=r, sx=S[0, 0], sy=S[1, 1])
 
 
 def to_out(cam, q):
-    cx, cy, s, rot, ax, ay = cam
-    th = np.radians(rot)
-    c, sn = np.cos(th), np.sin(th)
-    v = (np.asarray(q, dtype=float) - np.array([cx, cy])) / s
-    return np.array([ax, ay]) + np.array([c * v[0] + sn * v[1], -sn * v[0] + c * v[1]])
+    q = np.asarray(q, dtype=float)
+    return cam['M'][:, :2] @ q + cam['M'][:, 2]
 
 
 def render_cutout(k, cam, size=(W, H)):
-    cx, cy, s, rot, ax, ay = cam
     d = _CUT[k]
-    th = np.radians(rot)
-    c, sn = np.cos(th), np.sin(th)
-    m = np.array([[s * c, -s * sn, 0], [s * sn, s * c, 0]], dtype=np.float64)
-    m[:, 2] = np.array([cx, cy]) - m[:, :2] @ np.array([ax, ay])
-    m *= d['f']
-    return cv2.warpAffine(d['img'], m, size, flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+    m = cam['M'].copy()
+    m[:, :2] /= d['f']
+    return cv2.warpAffine(d['img'], m, size, flags=cv2.INTER_LINEAR,
                           borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
 
 
 def mouth_geom(k, cam):
     m = GEOM[k]['mouth']
-    s = cam[2]
+    sv = cam['s'] / cam['sy']
+    sh = cam['s'] / cam['sx']
     xc, lip = to_out(cam, (m['x'], m['lip']))
-    slope = np.tan(np.arctan(m['slope']) - np.radians(cam[3]))
-    return dict(xc=xc, lip=lip, gap=m['gap'] / s, J=(m['jaw'] - m['lip']) / s, D=m['decay'] / s,
-                half=m['half'] / s, slope=slope, amax=m['amax'] / s)
+    slope = np.tan(np.arctan(m['slope']) - np.radians(cam['rot']))
+    return dict(xc=xc, lip=lip, gap=m['gap'] / sv, J=(m['jaw'] - m['lip']) / sv, D=m['decay'] / sv,
+                half=m['half'] / sh, slope=slope, amax=1.25 * m['amax'] / sv)
+
+
+# ----------------------------------------------------------------- Bewegung: Kopf und Augen
+POSE = {}
+
+
+def compute_pose():
+    """Kopfbewegung und Augen je Videobild aus Beat und Gesang."""
+    from scipy import signal
+    t = np.arange(NF) / FPS
+    theta, lift, scl, vib = (np.zeros(NF) for _ in range(4))
+    for i, b in enumerate(BEATS):        # Nicken im Takt, abwechselnd links/rechts
+        e = np.where(t >= b, np.exp(-(t - b) / 0.18), 0)
+        theta += 2.4 * (1 if i % 2 == 0 else -1) * e
+        lift += 0.018 * e
+    eyes = np.zeros(NF)
+    for j, n in enumerate(TL.vocal_notes()):
+        d = n['t1'] - n['t0']
+        a = t - n['t0']
+        on = (a >= 0) & (t < n['t1'] + 0.15)
+        side = 1 if j % 2 else -1
+        lift += np.where(on, -0.03 * np.exp(-a / 0.12), 0)                 # Ansatz jeder Silbe
+        theta += np.where(on, 1.8 * side * np.exp(-a / 0.2), 0)
+        lift += np.where(on, -0.035 * (n['midi'] - 72) / 12 * smooth(a / 0.15), 0)   # hohe Töne: Kopf hoch
+        if d > 0.7:                                                          # lange Töne: Kopf in den Nacken
+            p = smooth((a - 0.15) / 0.5) * smooth((n['t1'] + 0.1 - t) / 0.25)
+            theta += np.where(on, side * 6 * p, 0)
+            lift += np.where(on, -0.06 * p, 0)
+            scl += np.where(on, 0.03 * p, 0)
+            vib = np.maximum(vib, np.where(on, p, 0))
+        if d > 0.9:                                                          # Augen zu vor Hingabe
+            p = smooth((a - 0.3) / 0.3) * smooth((n['t1'] - 0.05 - t) / 0.2)
+            eyes = np.maximum(eyes, np.where(on, 0.85 * p, 0))
+    sos = signal.butter(2, 4, fs=FPS, output='sos')
+    theta, lift, scl = (signal.sosfiltfilt(sos, x) for x in (theta, lift, scl))
+    theta += 1.3 * np.sin(2 * np.pi * 5.3 * t) * np.clip(vib, 0, 1)        # Vibrato-Wackeln
+    rng = np.random.default_rng(11)
+    tb = 1.2
+    while tb < TL.DURATION:                                                  # natürliches Blinzeln
+        eyes = np.maximum(eyes, np.clip(1 - np.abs(t - tb) / 0.09, 0, 1))
+        tb += rng.uniform(2.2, 4.0)
+    POSE.update(theta=theta, lift=lift, scl=scl, eyes=eyes)
+
+
+def eye_close(layer, cam, k, c):
+    """Augenlider schließen: Fell über dem Auge wird nach unten gezogen."""
+    if c < 0.03:
+        return layer
+    fh, fw = layer.shape[:2]
+    for ex, ey, ew, eh in EYES[k]:
+        e = to_out(cam, (ex, ey))
+        ew_o, eh_o = ew / cam['s'], eh / cam['s']
+        if ew_o < 3:
+            continue
+        band = eh_o * 1.6
+        x0, x1 = int(max(e[0] - ew_o, 0)), int(min(e[0] + ew_o, fw - 1))
+        y0, y1 = int(max(e[1] - eh_o - band - 2, 0)), int(min(e[1] + eh_o + 2, fh - 1))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        xs = np.arange(x0, x1 + 1, dtype=np.float32)
+        Y = np.arange(y0, y1 + 1, dtype=np.float32)[:, None]
+        prof = np.sqrt(np.clip(1 - ((xs - e[0]) / ew_o) ** 2, 0, 1))[None]
+        top = e[1] - eh_o * prof
+        lid = top + c * 2 * eh_o * prof * 0.95
+        cover = (Y < lid) & (Y > top - band)
+        ysrc = (top - band) + (Y - (top - band)) * band / (band + (lid - top))
+        my = np.where(cover, ysrc, Y).astype(np.float32)
+        mx = np.broadcast_to(xs[None], my.shape).copy()
+        patch = cv2.remap(layer, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT101).astype(np.float32)
+        lash = np.exp(-((Y - lid) / 1.6) ** 2) * (prof > 0.15) * min(1, c * 1.5)
+        patch[..., :3] *= (1 - 0.5 * lash[..., None])
+        layer[y0:y1 + 1, x0:x1 + 1] = patch.astype(np.uint8)
+    return layer
+
+
+def head_warp(layer, cam, k, fi):
+    """Dreht, hebt und skaliert den Kopf um den Hals (weich ausgeblendet zum Körper)."""
+    hd = HEAD[k]
+    th = np.radians(POSE['theta'][fi])
+    sc = 1 + POSE['scl'][fi]
+    R = hd['R'] / cam['s']
+    dy = POSE['lift'][fi] * R
+    if abs(th) < 1e-3 and abs(dy) < 0.3 and abs(sc - 1) < 1e-3:
+        return layer
+    fh, fw = layer.shape[:2]
+    hc, pv = to_out(cam, hd['c']), to_out(cam, hd['pivot'])
+    rr = 1.75 * R
+    x0, x1 = int(max(hc[0] - rr, 0)), int(min(hc[0] + rr, fw - 1))
+    y0, y1 = int(max(hc[1] - rr, 0)), int(min(hc[1] + rr, fh - 1))
+    if x1 <= x0 or y1 <= y0:
+        return layer
+    yy, xx = np.mgrid[y0:y1 + 1, x0:x1 + 1].astype(np.float32)
+    d = np.sqrt((xx - hc[0]) ** 2 + (yy - hc[1]) ** 2)
+    w = 1 - smooth((d - R) / (0.75 * R))
+    ang = th * w
+    c, s = np.cos(ang), np.sin(ang)
+    scale = 1 + (sc - 1) * w
+    X = xx - pv[0]
+    Y = yy - pv[1] - dy * w
+    mx = (pv[0] + (c * X + s * Y) / scale).astype(np.float32)
+    my = (pv[1] + (-s * X + c * Y) / scale).astype(np.float32)
+    patch = cv2.remap(layer, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
+    out = layer.copy()
+    out[y0:y1 + 1, x0:x1 + 1] = patch
+    return out
+
+
+def animate(k, cam, size, fi):
+    """Billy rendern: Augen, Maul, Kopfbewegung."""
+    lay = render_cutout(k, cam, size)
+    lay = eye_close(lay, cam, k, float(POSE['eyes'][fi]))
+    lay = open_mouth(lay, mouth_geom(k, cam), float(MOUTH[fi]))
+    return head_warp(lay, cam, k, fi)
 
 
 def open_mouth(frame, g, amount):
@@ -372,9 +502,9 @@ def draw_mic(F, k, cam, t):
     spr, (cx, cy), (kx, ky) = SPR['mic']
     fh, fw = F.shape[:2]
     gx, gy = to_out(cam, (spec['x'], spec['y']))
-    r_out = spec['r'] / cam[2]
+    r_out = spec['r'] / cam['s']
     sc = r_out / MIC_R
-    ang = spec['tilt'] - cam[3] + 1.5 * np.sin(2 * np.pi * t / 3.1)
+    ang = spec['tilt'] - cam['rot'] + 1.5 * np.sin(2 * np.pi * t / 3.1)
     m = cv2.getRotationMatrix2D((cx, cy), ang, sc)
     m[0, 2] += gx - cx
     m[1, 2] += gy - cy
@@ -589,14 +719,12 @@ def shot_cam(sh, t):
     return make_cam(sh['img'], sh['fr'], sh['t0'], sh['t1'], t, sh.get('z', (1, 1)), sh.get('rot', (0, 0)))
 
 
-def render_grid(sh, t, mouth):
+def render_grid(sh, t, fi):
     tw, th = W // 2, H // 3
     layers = {}
     for k in set(sh['imgs']):
         cam = make_cam(k, 'tile', sh['t0'], sh['t1'], t, (1.0, 1.06))
-        lay = render_cutout(k, cam, (tw, th))
-        lay = open_mouth(lay, mouth_geom(k, cam), mouth)
-        layers[k] = (lay, cam)
+        layers[k] = (animate(k, cam, (tw, th), fi), cam)
     F = np.zeros((H, W, 3), np.float32)
     for i, k in enumerate(sh['imgs']):
         r, c = divmod(i, 2)
@@ -613,14 +741,13 @@ def render_grid(sh, t, mouth):
     return F
 
 
-def render_shot(sh, t, mouth):
+def render_shot(sh, t, fi):
     if sh['bg'] == 'grid':
-        return render_grid(sh, t, mouth)
+        return render_grid(sh, t, fi)
     F = background(sh, t)
     k = sh['img']
     cam = shot_cam(sh, t)
-    lay = render_cutout(k, cam)
-    lay = open_mouth(lay, mouth_geom(k, cam), mouth)
+    lay = animate(k, cam, (W, H), fi)
     if sh['bg'] == 'stage':
         composite_billy(F, lay, outline=0, shadow=None)
     else:
@@ -876,7 +1003,6 @@ def draw_particles(F, t):
 
 # ----------------------------------------------------------------- Bild komponieren
 MOUTH = None
-GRAIN = []
 
 
 def init_worker():
@@ -885,10 +1011,8 @@ def init_worker():
     build_sprites()
     build_lyrics()
     build_particles()
-    rng = np.random.default_rng(3)
-    for _ in range(6):
-        GRAIN.append(cv2.GaussianBlur((rng.standard_normal((H // 2, W // 2)) * 0.018).astype(np.float32), (0, 0), 0.8))
     MOUTH = TL.mouth_open(np.arange(NF) / FPS)
+    compute_pose()
 
 
 def vhs(F, t, t_cut, fi):
@@ -912,7 +1036,7 @@ def render(fi):
     t = fi / FPS
     sh = shot_at(t)
     sec = TL.section_at(t)
-    F = render_shot(sh, t, float(MOUTH[fi]))
+    F = render_shot(sh, t, fi)
     # Stroboskop / Blitze
     if sec == 'chorus':
         snares = np.array([TL.bt(b, k) for b in range(14, 18) for k in (1, 3)])
@@ -930,8 +1054,6 @@ def render(fi):
     if d > 0:
         F[:, d:, 0] = F[:, :-d, 0].copy()
         F[:, :-d, 2] = F[:, d:, 2].copy()
-    g = cv2.resize(GRAIN[(fi // 3) % len(GRAIN)], (W, H), interpolation=cv2.INTER_LINEAR)
-    F += g[..., None]
     np.clip(F, 0, 1, out=F)
     draw_particles(F, t)
     draw_bigwords(F, t)
@@ -966,10 +1088,13 @@ def main():
     wav, mp4 = sys.argv[1], sys.argv[2]
     init_worker()
     write_srt(os.path.splitext(mp4)[0] + '.srt')
+    build = os.path.join(ROOT, 'build')
+    os.makedirs(build, exist_ok=True)
+    raw = os.path.join(build, 'video_raw.mp4')
+    # 1) Bilder in 1080x1920 rendern, als hochwertiges Zwischenvideo in 720x1280 ablegen
     cmd = ['ffmpeg', '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
-           '-s', f'{W}x{H}', '-r', str(FPS), '-i', '-', '-i', wav,
-           '-c:v', 'libx264', '-preset', 'slow', '-crf', '23', '-maxrate', '9M', '-bufsize', '18M',
-           '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', mp4]
+           '-s', f'{W}x{H}', '-r', str(FPS), '-i', '-', '-vf', f'scale={OUT_W}:{OUT_H}:flags=lanczos',
+           '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '12', '-pix_fmt', 'yuv420p', raw]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     with Pool(os.cpu_count(), initializer=init_worker) as pool:
         for i, fr in enumerate(pool.imap(render, range(NF), chunksize=4)):
@@ -978,7 +1103,17 @@ def main():
                 print(f'  Bild {i}/{NF}', flush=True)
     proc.stdin.close()
     proc.wait()
-    print('fertig:', mp4)
+    # 2) Zwei-Pass-Encoding auf eine feste Zielgröße (unter 20 MB)
+    vbit = int(TARGET_MB * 8e6 / TL.DURATION - 128e3)
+    log = os.path.join(build, 'x264pass')
+    common = ['-c:v', 'libx264', '-preset', 'slow', '-b:v', str(vbit), '-maxrate', str(int(vbit * 1.6)),
+              '-bufsize', str(int(vbit * 2)), '-pix_fmt', 'yuv420p', '-passlogfile', log]
+    subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', raw] + common + ['-pass', '1', '-an', '-f', 'mp4', os.devnull],
+                   check=True)
+    subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', raw, '-i', wav] + common +
+                   ['-pass', '2', '-c:a', 'aac', '-b:a', '128k', '-shortest', '-movflags', '+faststart', mp4],
+                   check=True)
+    print('fertig:', mp4, f'{os.path.getsize(mp4) / 1e6:.1f} MB')
 
 
 if __name__ == '__main__':

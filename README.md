@@ -9,7 +9,7 @@ Hammond-Orgel und singender Leadgitarre.
 <p align="center"><img src="video/poster.jpg" width="320" alt="Billy singt ins Mikrofon"></p>
 
 ▶️ **Video:** [`video/LordBilly_OyeComoWau.mp4`](video/LordBilly_OyeComoWau.mp4)
-(1080×1920 Hochformat, 30 fps, 45 s, mit Ton)
+(720×1280 Hochformat, 30 fps, 45 s, mit Ton, ca. 19 MB)
 
 ## Inhalt
 
@@ -36,6 +36,12 @@ Hammond-Orgel und singender Leadgitarre.
   »Weltpremiere«-Banner und Credits unten links
 - **Gesang:** Billy singt mit einer tiefen Männerstimme im Bariton (A2–A3).
   Sein Unterkiefer bewegt sich synchron zu jedem gesungenen Laut.
+- **Bewegung beim Singen:** Billy nickt im Takt und neigt den Kopf
+  abwechselnd nach links und rechts. Bei jeder Silbe setzt der Kopf kurz an,
+  bei hohen Tönen hebt er ihn. Bei langen Tönen legt er den Kopf in den
+  Nacken, schließt die Augen und wackelt im Vibrato. Er blinzelt
+  zwischendurch, hüpft auf dem Beat und wird dabei kurz gestaucht und
+  gestreckt.
 - **Mikrofon:** Vor dem Maul steht ein Gesangsmikrofon auf einem Ständer.
 - **Untertitel:** Unten im Bild steht immer die Zeile, die Billy gerade
   singt. Die schon gesungenen Silben färben sich gelb (Karaoke-Stil).
@@ -88,7 +94,9 @@ python3 src/make_video.py build/song.wav video/LordBilly_OyeComoWau.mp4
 - `src/make_cutouts.py`: stellt Billy frei (BiRefNet für die Fellkontur,
   bei Foto C zusätzlich Segment Anything, um die Person dahinter
   auszuschließen) und rechnet Hintergrundfarbe aus den Fellhaaren heraus
-- `src/make_video.py`: Neon-Hintergründe, Billy-Sticker, Unterkiefer-
-  Animation, Mikrofon, MTV-Effekte, Titel und Karaoke-Untertitel
+- `src/make_video.py`: Neon-Hintergründe, Billy-Sticker, Bewegung (Kopf,
+  Augen, Unterkiefer, Hüpfen), Mikrofon, MTV-Effekte, Titel und
+  Karaoke-Untertitel; rendert in 1080×1920 und komprimiert per
+  Zwei-Pass-Encoding auf 720×1280 unter 20 MB
 
 Einzelne Vorschaubilder: `python3 src/make_video.py --preview 13.1,29.3 vorschau/`
